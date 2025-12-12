@@ -523,7 +523,7 @@ INSERT INTO orders (id, ...) VALUES (UUID(), ...);
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Justify WHY sharding is needed (calculate data size, QPS)
 - [ ] Choose shard key with clear reasoning
@@ -534,7 +534,7 @@ INSERT INTO orders (id, ...) VALUES (UUID(), ...);
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **When to shard:**
 - Single node can't handle write throughput

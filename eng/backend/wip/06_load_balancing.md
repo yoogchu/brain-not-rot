@@ -548,7 +548,7 @@ One LB fails:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Choose L4 vs L7 based on requirements
 - [ ] Select appropriate algorithm (least connections for variable-duration requests)
@@ -559,7 +559,7 @@ One LB fails:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **L4 vs L7 decision:**
 - Default to L7 for HTTP services (more visibility, features)

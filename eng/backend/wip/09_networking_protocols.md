@@ -565,7 +565,7 @@ Client ◄───── ChatMessage ───────────── Se
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain TCP vs UDP trade-offs
 - [ ] Describe HTTP evolution (1.1 → 2 → 3)
@@ -576,7 +576,7 @@ Client ◄───── ChatMessage ───────────── Se
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Protocol selection framework:**
 1. Public API? → REST (universality)

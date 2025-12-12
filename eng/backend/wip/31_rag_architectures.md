@@ -513,7 +513,7 @@ def safe_rag_answer(query: str) -> str:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain basic RAG pipeline components
 - [ ] Describe chunking strategies and trade-offs
@@ -524,7 +524,7 @@ def safe_rag_answer(query: str) -> str:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Chunking strategy:**
 - Start with 512 tokens, overlap 50

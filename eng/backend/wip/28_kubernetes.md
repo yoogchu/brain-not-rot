@@ -564,7 +564,7 @@ spec:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain Pod, Deployment, Service, Ingress
 - [ ] Describe resource requests vs limits
@@ -575,7 +575,7 @@ spec:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Resource sizing:**
 - Start with requests based on load testing

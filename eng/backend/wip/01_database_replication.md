@@ -582,9 +582,9 @@ Sync only keys in bucket 2 (efficient!)
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
-When discussing replication in interviews:
+Key areas to understand:
 
 - [ ] Clarify durability requirements (can we lose data?)
 - [ ] Discuss failover strategy and timing
@@ -595,7 +595,7 @@ When discussing replication in interviews:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **AWS RDS Multi-AZ failover** takes 60-120 seconds. For faster failover:
 - Aurora: ~30 seconds

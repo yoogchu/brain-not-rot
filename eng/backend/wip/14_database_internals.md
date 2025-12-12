@@ -514,7 +514,7 @@ default_pool_size = 20
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain B-tree vs LSM-tree trade-offs
 - [ ] Know when to create indexes (and when not to)
@@ -525,7 +525,7 @@ default_pool_size = 20
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Index strategy:**
 - Don't over-index (writes slow, storage cost)

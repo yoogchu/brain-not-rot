@@ -482,7 +482,7 @@ Consumer: Projects events to read model
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain Kafka's performance characteristics (sequential I/O, zero-copy)
 - [ ] Describe partitions and consumer groups
@@ -493,7 +493,7 @@ Consumer: Projects events to read model
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Partition count:**
 - More partitions = more parallelism

@@ -552,7 +552,7 @@ readinessProbe:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain DNS resolution hierarchy
 - [ ] Describe common record types (A, CNAME, SRV)
@@ -564,7 +564,7 @@ readinessProbe:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **DNS gotchas:**
 - JVM caches DNS forever by default (set `networkaddress.cache.ttl`)

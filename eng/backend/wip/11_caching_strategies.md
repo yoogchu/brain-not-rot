@@ -538,7 +538,7 @@ How to improve:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Choose appropriate cache pattern (cache-aside, write-through, etc.)
 - [ ] Address cache invalidation strategy
@@ -550,7 +550,7 @@ How to improve:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Cache is a contract:**
 - What's the max staleness your product can tolerate?

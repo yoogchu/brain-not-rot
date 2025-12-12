@@ -524,7 +524,7 @@ async function handleRequest(request) {
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Identify cacheable vs dynamic content
 - [ ] Choose cache invalidation strategy (prefer versioned URLs)
@@ -537,7 +537,7 @@ async function handleRequest(request) {
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Cache hit ratio is everything:**
 - 90% hit ratio: Origin handles 10% of traffic

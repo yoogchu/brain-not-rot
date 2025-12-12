@@ -548,7 +548,7 @@ Is data loss ever acceptable?
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Clarify consistency requirements for each operation type
 - [ ] Distinguish read vs write consistency needs
@@ -559,7 +559,7 @@ Is data loss ever acceptable?
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Linearizability is expensive:**
 Cross-datacenter linearizability can add 100-300ms to every operation. Often better to use causal consistency + conflict resolution.

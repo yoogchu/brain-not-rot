@@ -488,7 +488,7 @@ groups:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain the three pillars and when to use each
 - [ ] Describe RED and USE methods
@@ -499,7 +499,7 @@ groups:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Observability costs:**
 - Metrics: Low (aggregated)

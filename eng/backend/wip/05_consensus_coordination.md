@@ -583,7 +583,7 @@ Election time: 150-500ms typically
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain why consensus is needed (avoid split-brain)
 - [ ] Describe leader election mechanism
@@ -594,7 +594,7 @@ Election time: 150-500ms typically
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Consensus is a building block, not a solution:**
 - Don't use ZooKeeper for everything

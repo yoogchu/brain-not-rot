@@ -656,7 +656,7 @@ TCC Three Phases:
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Identify if distributed transaction is actually needed
 - [ ] Design idempotent operations with idempotency keys
@@ -668,7 +668,7 @@ TCC Three Phases:
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Avoid distributed transactions when possible:**
 - Can you redesign to avoid cross-service transactions?

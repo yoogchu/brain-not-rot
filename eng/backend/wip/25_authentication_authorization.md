@@ -436,7 +436,7 @@ def login(username: str, password: str):
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain authentication vs authorization
 - [ ] Describe JWT structure and verification
@@ -448,7 +448,7 @@ def login(username: str, password: str):
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Token strategy:**
 - Access tokens: 15-60 minutes

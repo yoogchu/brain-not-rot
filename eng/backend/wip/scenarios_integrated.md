@@ -566,7 +566,7 @@ Redis down? Options:
 
 ---
 
-## Interview Checklist for Design Scenarios
+## Key Concepts Checklist
 
 - [ ] Clarify requirements (functional and non-functional)
 - [ ] Estimate scale (users, requests, storage)

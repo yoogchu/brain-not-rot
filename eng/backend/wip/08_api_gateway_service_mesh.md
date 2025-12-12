@@ -504,7 +504,7 @@ Client → API Gateway → Service A → (via mesh) → Service B
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Explain API Gateway's role (single entry point, cross-cutting concerns)
 - [ ] Describe key gateway functions (routing, auth, rate limiting)
@@ -516,7 +516,7 @@ Client → API Gateway → Service A → (via mesh) → Service B
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Gateway anti-patterns:**
 - Gateway becomes a monolith (too much logic)

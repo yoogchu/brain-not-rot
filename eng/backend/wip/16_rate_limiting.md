@@ -441,7 +441,7 @@ PLAN_LIMITS = {
 
 ---
 
-## Interview Checklist
+## Key Concepts Checklist
 
 - [ ] Choose appropriate algorithm (token bucket for API, sliding window for accuracy)
 - [ ] Design for distributed environment (Redis, or accept approximation)
@@ -452,7 +452,7 @@ PLAN_LIMITS = {
 
 ---
 
-## Staff+ Insights
+## Practical Insights
 
 **Rate limiting is business logic:**
 - Work with product to define limits
