@@ -1,0 +1,259 @@
+Chapter 39: I/O Models and Multiplexing
+
+The Core Problem
+
+Imagine your web server needs to handle 10,000 concurrent connections. Each connection might be waiting for a database query, waiting for a network response, waiting for disk I/O, or actually sending data.
+
+With traditional blocking I/O, you'd need 1 thread per connection. That means 10,000 connections equals 10,000 threads. Each thread requires 1 to 8 megabytes of stack memory. So you're looking at 10 to 80 gigabytes of RAM just for thread stacks, not counting your actual application data. The context switch overhead becomes enormous, and the scheduler is completely overwhelmed. The result? Your system grinds to a halt under moderate load.
+
+This is called the C10K problem: How do you handle 10,000 concurrent connections without creating 10,000 threads?
+
+The answer lies in understanding I/O models and multiplexing. Master these concepts, and you can build servers like nginx that handle over 50,000 connections per worker process, or Redis that achieves over 100,000 operations per second on a single thread. Ignore them, and your server will collapse under moderate load.
+
+Blocking versus Non-Blocking I/O
+
+Let me explain the fundamental distinction in I/O operations.
+
+Blocking I/O
+
+With blocking I/O, here's what happens. Your application calls read on a socket. The request goes to the kernel. The thread becomes blocked and sleeps. The kernel waits for data to arrive from the network. When data finally arrives, the kernel returns the data to the application, and the thread resumes execution.
+
+The key characteristics of blocking I/O are: the thread blocks until data is ready, it provides a simple programming model, you need one thread per connection, and it has high memory overhead at scale.
+
+Non-Blocking I/O
+
+Non-blocking I/O works differently. Your application calls read on a socket. If no data is ready, the kernel immediately returns with an EWOULDBLOCK error instead of blocking. Your application continues doing other work. Later, it tries reading again. Still no data, still EWOULDBLOCK. It continues other work. Eventually, when it tries again and data is ready, the kernel returns the actual data.
+
+The characteristics are: it returns immediately even if no data is available, it requires polling or some notification mechanism, it enables a single thread to handle multiple connections, and while more complex to program, it's highly scalable.
+
+Python Example
+
+Let me show you both approaches in Python. For blocking I/O, which is the default, you create a socket, connect to a server, send a request, and call receive. This recv call blocks until data arrives, then you print the data.
+
+For non-blocking I/O, you create a socket and call setblocking false to make it non-blocking. When you try to connect, it will raise BlockingIOError. You must handle EWOULDBLOCK or EAGAIN errors. You enter a loop where you repeatedly try to receive data. If you get BlockingIOError with errno EWOULDBLOCK, it means no data is ready yet, so you continue and do other work. Eventually, when data is ready, the recv call succeeds and you can process it.
+
+Synchronous versus Asynchronous I/O
+
+This is a different dimension from blocking versus non-blocking.
+
+Synchronous I/O means the application waits for the I/O operation to complete. It might block or poll, but either way it's waiting. The app tells the kernel to read data, the app waits either by blocking or by polling, the kernel returns the data, and the app processes it.
+
+Asynchronous I/O means the application initiates I/O and continues doing other work. The kernel notifies when the operation completes. The app tells the kernel to read data and notify when done. The app continues other work. The kernel reads data in the background. When the kernel completes the I/O, it notifies the app, and only then does the app process the data.
+
+The Four Combinations
+
+You can think of this as a 2 by 2 matrix. Synchronous and blocking gives you traditional blocking I/O. Synchronous and non-blocking gives you I/O multiplexing, which is what select and epoll provide. Asynchronous and blocking doesn't really exist. Asynchronous and non-blocking gives you true async I/O, like io underscore uring on Linux or IOCP on Windows.
+
+The C10K Problem
+
+This was coined by Dan Kegel in 1999. The question was: how do you handle 10,000 concurrent connections?
+
+Why was 10,000 so hard? The traditional approach of 1 thread per connection meant 10,000 connections times 2 megabytes of stack equals 20 gigabytes of RAM. You'd have 10,000 threads, which overwhelms the scheduler. Context switches become O of n squared with lock contention. The system becomes unusable.
+
+The solution was I/O multiplexing. The new approach uses 1 thread to monitor 10,000 sockets. The operating system notifies you which sockets are ready. You process only the ready sockets. There's no blocking and minimal context switches. The result is you can scale to 100,000 or more concurrent connections.
+
+Modern systems have tackled the C10M problem, which is 10 million connections. This requires kernel bypass and user-space networking, achieved only by specialized systems.
+
+I/O Multiplexing: select
+
+Select was the original I/O multiplexing system call, introduced in 1983 in BSD.
+
+How it works: Your app tells the kernel, here are N file descriptors, tell me which ones are ready to read or write. The kernel checks all N descriptors and returns a bitmask of the ready ones. Your app iterates through the bitmask and processes the ready file descriptors.
+
+The select system call takes several parameters: nfds is the highest file descriptor number plus one, readfds is the set of file descriptors to check for reading, writefds is the set to check for writing, exceptfds is the set to check for exceptions, and timeout specifies how long to wait.
+
+Python Example
+
+In Python, you create a listening socket, set it to non-blocking, and maintain a list of all sockets you're monitoring. In a loop, you call select.select, passing the sockets list. This blocks until at least one socket is ready. You can specify a timeout, like 1 second.
+
+For each readable socket, if it's the server socket, you accept a new connection, set it to non-blocking, and add it to your sockets list. If it's a client socket, you receive data. If you get data, you send a response. If the connection is closed, you remove the socket from your list and close it.
+
+Select Limitations
+
+Select has significant limitations. There's an FD underscore SETSIZE limit, usually 1024 max file descriptors. The performance is O of n because the kernel checks all file descriptors even if only one is ready. There's copy overhead because the fd set is copied to and from the kernel on each call. And there's no information about which file descriptors changed since the last call, so you must check them all.
+
+The result is select works for small numbers of connections but doesn't scale to C10K.
+
+I/O Multiplexing: poll
+
+Poll was an improvement over select, introduced in 1986 in System V.
+
+The poll system call takes an array of pollfd structures, the number of items in the array, and a timeout in milliseconds. Each pollfd structure contains the file descriptor, the events to monitor like POLLIN or POLLOUT, and revents where the kernel writes which events occurred.
+
+Improvements over select: poll has no FD underscore SETSIZE limit, it has a cleaner API using arrays instead of bitmasks, and it separates input and output using events and revents fields. However, it still has O of n scanning performance and still copies all file descriptors to the kernel on each call.
+
+Python Example
+
+You create a server socket and a poller object using select.poll. You register the server socket for read events. You maintain a mapping from file descriptor to socket object.
+
+In a loop, you call poll which returns a list of file descriptor, event tuples. For the server socket, you accept new connections and register them. For client sockets, if the event is POLLIN meaning data is available, you receive data and send a response. If the connection closes, you unregister the file descriptor and close the socket.
+
+Poll is still O of n, but it's better than select for large numbers of file descriptors.
+
+I/O Multiplexing: epoll on Linux
+
+Epoll is the modern solution for Linux, introduced in 2002 in kernel version 2.5.44.
+
+How epoll works: First, you call epoll underscore create to get an epoll file descriptor. Then you call epoll underscore ctl with ADD to register your interest in specific file descriptors. The kernel maintains this interest list internally. When you call epoll underscore wait, it returns only the ready file descriptors. This is O of 1 lookup with no scanning required.
+
+The API consists of three functions. epoll underscore create1 creates an epoll instance. epoll underscore ctl adds, modifies, or removes file descriptors from the epoll instance. epoll underscore wait waits for events and fills an output buffer with ready file descriptors.
+
+Edge-Triggered versus Level-Triggered
+
+Epoll supports two notification modes.
+
+Level-triggered is the default. Imagine a socket has 1000 bytes available. epoll underscore wait returns the file descriptor because data is available. Your app reads 500 bytes. You call epoll underscore wait again, and it returns the same file descriptor again because there are still 500 bytes left. You read the remaining 500 bytes. Now epoll underscore wait blocks because no data remains.
+
+Edge-triggered uses the EPOLLET flag. With the same scenario, the socket has 1000 bytes available. epoll underscore wait returns the file descriptor because the state changed from 0 bytes to 1000 bytes. Your app reads 500 bytes. You call epoll underscore wait again, but now it blocks even though 500 bytes remain. The state didn't change, so you get no notification. You must read until you get EWOULDBLOCK to avoid missing data.
+
+Python Example
+
+You create a server socket and an epoll object. You register the server for read events. In the event loop, epoll.poll returns only ready file descriptors. For the server socket, you accept connections and register them with EPOLLIN and EPOLLET for edge-triggered mode. For client sockets with EPOLLIN events, because you're using edge-triggered mode, you must read in a loop until you get BlockingIOError, which is expected. If the connection closes or there's an error, you unregister and close the socket.
+
+Epoll Advantages
+
+Compared to select and poll, epoll can handle millions of file descriptors. The performance is O of 1 using a ready list instead of O of n scanning. Kernel copies happen once at registration, not on every call. It supports edge-triggered mode optionally. It's designed for high-scale servers.
+
+This is why nginx can handle over 50,000 connections per worker process.
+
+I/O Multiplexing: kqueue on BSD and macOS
+
+kqueue is BSD's answer to epoll, introduced in 2000 in FreeBSD 4.1.
+
+kqueue is more general than epoll. You call kqueue to create a kernel event queue. You call kevent to both register events and wait for them in a single system call. It supports not just socket I/O like epoll, but also file changes similar to inotify, signals, timers, and process events.
+
+Compared to epoll: epoll is Linux only while kqueue is for BSD and macOS. epoll handles I/O events only, while kqueue handles I/O, files, signals, timers, and processes. epoll uses three functions while kqueue uses two. In epoll you register with epoll underscore ctl and wait with epoll underscore wait, while in kqueue you use the same kevent function for both.
+
+kqueue is more general-purpose but less common in production because of Linux's dominance in the server market.
+
+Python's selectors Module
+
+Python provides a cross-platform abstraction over all these mechanisms through the selectors module.
+
+The selectors module automatically chooses the best available mechanism. It uses epoll on Linux, kqueue on BSD and macOS, and falls back to poll or select elsewhere.
+
+You create a selector using selectors.DefaultSelector. You create a server socket and set it to non-blocking. You define callback functions for accepting connections and handling client data. You register the server socket with the selector, passing the callback as data.
+
+In the event loop, you call selector.select with a timeout. For each event, you extract the callback function from key.data and call it with the socket from key.fileobj.
+
+This is portable, high-level, and recommended for production Python applications.
+
+The Reactor Pattern
+
+The Reactor pattern is a design pattern for I/O multiplexing event loops.
+
+The structure consists of an event loop, also called the reactor, which runs in a while loop. It waits for events, then dispatches each event to the appropriate handler. The handlers are functions like on read, on write, on connect, and on close.
+
+Implementation in Python
+
+You create a Reactor class with a selector. It has a register method to register a socket with events and a handler callback. It has an unregister method. The run method is the main event loop. It repeatedly calls selector.select and invokes the handler for each event. The stop method terminates the loop.
+
+For usage, you create handler functions for accepting connections and reading data. You create a server socket, register it with the reactor, and call reactor.run to start the event loop.
+
+This pattern is used by nginx, Redis, Node.js, Twisted, and Python's asyncio.
+
+The Proactor Pattern
+
+The Proactor pattern is for asynchronous I/O where the kernel performs the operation.
+
+The difference between Reactor and Proactor: With Reactor, the kernel tells the app "socket is ready to read", then the app calls read to get the data, then the app processes it. With Proactor, the app tells the kernel "read and notify when done", the app continues other work, the kernel reads in the background, then the kernel tells the app "read complete, here's the data", and the app processes it.
+
+With io underscore uring on Linux, you create an io uring object. You submit operations like reads, writes, and accepts to the submission queue. All these operations are submitted in a single system call. The kernel performs the operations asynchronously. Later, you check for completions. The data is already in your buffer, ready to process.
+
+This is used by modern high-performance systems. io underscore uring adoption is growing.
+
+Zero-Copy I/O
+
+Zero-copy I/O avoids copying data between kernel and user space.
+
+Traditional I/O
+
+With traditional file sending, there are four copies. First, data goes from disk to kernel buffer using DMA. Second, kernel buffer to user buffer, which is a CPU copy. Third, user buffer to socket buffer, another CPU copy. Fourth, socket buffer to network card using DMA. Total: 2 DMA operations and 2 CPU copies. Data crosses the user-kernel boundary twice.
+
+With sendfile
+
+The sendfile system call reduces this to 2 copies. Data goes from disk to kernel buffer using DMA. Then kernel buffer directly to network card using DMA, with no CPU copy. Total: 2 DMA operations, zero CPU copies, and no user-space involvement.
+
+Python Example
+
+You open a file and get its size. You create a socket connection. You call os.sendfile in a loop, passing the destination socket, the source file descriptor, the offset in the file, and the number of bytes to send. The kernel handles everything without copying through user space.
+
+The splice system call on Linux is more general. It moves data between two file descriptors without user-space copying.
+
+This is used by nginx, Apache, and static file servers for dramatic performance improvements.
+
+io underscore uring: Modern Async I/O on Linux
+
+io underscore uring is the future of Linux I/O, introduced in kernel 5.1.
+
+Why io underscore uring? The old APIs have problems. epoll only tells you the file descriptor is ready, you still need a system call to read or write, and that's one system call per readiness check. Linux AIO is complex, limited to O underscore DIRECT, has poor performance, and is rarely used.
+
+io underscore uring provides true async I/O, can batch multiple operations in one system call, supports zero-copy, and can use polling to avoid system calls entirely.
+
+Architecture
+
+io underscore uring uses two ring buffers: a submission queue and a completion queue. These are in shared memory between user space and kernel space. Your app writes operations to the submission queue without a system call. The kernel processes the operations. The kernel writes results to the completion queue. Your app reads from the completion queue, again without a system call.
+
+Conceptual Example
+
+You create an io uring ring. You add multiple operations to the submission queue: a read from a file, a write to a socket, an accept on a server socket. Each operation has user data to identify it. You submit all operations in a single system call. Later, you process completions. Each completion has the user data and the result, and the data is already in your buffer.
+
+Advantages
+
+Compared to epoll, io underscore uring supports batching many operations in one system call instead of one system call per readiness check. It provides I/O completion notification rather than just readiness. It supports zero-copy. It handles all I/O types including files and network, not just network sockets.
+
+Adoption is new but growing. It's used by RocksDB, ScyllaDB, and QEMU.
+
+How nginx Achieves High Concurrency
+
+Let me put all these concepts together to explain nginx.
+
+nginx uses a master process that spawns multiple worker processes. Each worker runs an event loop and can handle 50,000 or more connections. Each worker is single-threaded with non-blocking I/O, uses epoll on Linux or kqueue on BSD, has no context switches, and handles 10,000 to 100,000 concurrent connections.
+
+Key techniques include: edge-triggered epoll for maximum performance, non-blocking sockets everywhere, sendfile for static files to avoid copying, connection pooling to upstream servers, and asynchronous disk I/O using a thread pool for operations that might block.
+
+Configuration Example
+
+In nginx.conf, you set worker processes to match your CPU cores, like 4. In the events section, you set worker connections to 50,000 for the max connections per worker. You specify use epoll to use epoll on Linux. You enable multi accept to accept multiple connections at once.
+
+In the http section, you enable sendfile to use the sendfile system call for static files. You enable tcp underscore nopush to optimize packet sending. You enable tcp underscore nodelay to disable Nagle's algorithm for lower latency. You set keepalive underscore timeout to 65 seconds to keep connections alive. You configure aio threads to use a thread pool for blocking operations.
+
+The result is nginx can handle over 200,000 concurrent connections on commodity hardware.
+
+How Redis Achieves High Throughput
+
+Redis is single-threaded yet achieves over 100,000 operations per second.
+
+The I/O Model
+
+Redis uses a single event loop thread. In a while loop, it calls epoll.wait to get events. For each event, if it's a new connection, it calls accept. If it's client data, it reads the command, executes the command, which happens in memory so it's non-blocking, and writes the response.
+
+Why single-threaded? All data is in RAM, so there's no blocking I/O. No locks are needed. There are no context switches. It's CPU cache friendly. The performance is 100,000 operations per second on a single instance, bounded by network bandwidth, not CPU.
+
+Redis 6.0 I/O Threading
+
+Starting with Redis 6.0, there are I/O threads for reading and writing. The main thread still runs the event loop with epoll or kqueue, executes all commands in a single thread to avoid locks, and manages all state. Separate I/O threads handle reading from different groups of clients and writing to different groups of clients.
+
+This parallelizes I/O while keeping command execution serial. There are still no locks on data structures.
+
+Comparison Table
+
+Let me compare all these mechanisms. select works on all platforms, has O of n performance with a max of 1024 file descriptors, has low complexity, and is used for legacy systems and small servers. poll works on all platforms, has O of n performance with no file descriptor limit, has low complexity, and is portable for medium scale systems. epoll is Linux only, has O of 1 performance with millions of file descriptors, has medium complexity, and is used for high-scale Linux servers. kqueue is for BSD and macOS, has O of 1 performance with millions of file descriptors, has medium complexity, and is used for BSD and macOS servers. io underscore uring is Linux 5.1 and later, has O of 1 performance with true async I/O, has high complexity, and is used for cutting-edge performance. The selectors module works on all platforms, chooses the best available mechanism, has low complexity, and is recommended for Python production applications.
+
+Key Concepts Checklist
+
+Make sure you can explain blocking versus non-blocking I/O. Describe the C10K problem and its solution. Compare select, poll, and epoll performance characteristics. Implement a basic event loop with selectors. Explain edge-triggered versus level-triggered modes. Describe Reactor versus Proactor patterns. Explain zero-copy I/O using sendfile. Understand how nginx and Redis achieve high concurrency.
+
+Practical Insights
+
+Use the selectors module in Python. It automatically picks the best mechanism: epoll on Linux, kqueue on BSD and macOS, poll elsewhere. Don't hand-code select, poll, or epoll unless you have specific requirements.
+
+Edge-triggered epoll is faster but harder to get right. You must read until you get EWOULDBLOCK or you'll miss data. Level-triggered is safer for most applications. Profile before optimizing to edge-triggered.
+
+Single-threaded event loops scale surprisingly well. nginx and Redis prove that one thread can handle tens of thousands of connections if you avoid blocking. Add threads only for CPU-bound work like hashing and compression, or truly blocking I/O like disk operations on older kernels.
+
+io underscore uring is the future on Linux. It's more complex than epoll but offers true async I/O with batching and zero-copy. Watch for library support like liburing and Rust's tokio-uring. It's not production-ready for all workloads yet, but it's getting there.
+
+sendfile is a huge win for static file servers. If you're serving files like images, videos, or downloads, use sendfile or similar zero-copy mechanisms. The difference between 2 copies and 0 copies is dramatic at scale.
+
+Don't mix blocking and non-blocking in the same event loop. A single blocking call, like a synchronous database query or file read without async I/O, will stall the entire loop, defeating the purpose. Use thread pools or async drivers for all I/O operations.

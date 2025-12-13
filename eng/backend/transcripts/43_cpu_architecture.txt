@@ -1,0 +1,199 @@
+Chapter 43: CPU Architecture and Performance
+
+The Core Problem
+
+Your API server handles 50,000 requests per second. You've optimized the database queries. You've tuned the network stack. You've added caching everywhere. But response times are still inconsistent. P99 latency spikes from 10 milliseconds to 200 milliseconds under load.
+
+You profile the application and discover the bottleneck: CPU cache misses.
+
+Here's a concrete scenario. You're processing user session data. With a cache-friendly array layout where you store user ID, session token, and last active time together in a struct, processing time is 2 milliseconds for 10,000 sessions. But with a cache-hostile layout using separate arrays for user IDs, tokens, and timestamps, processing time jumps to 15 milliseconds for the same 10,000 sessions. That's 7.5 times slower!
+
+It's the same algorithm, the same data, just different memory layout. The difference is that CPU cache hit rate drops from 95% to 60%. A CPU cache miss costs 100 to 300 CPU cycles. At 50,000 requests per second with poor cache locality, you're wasting billions of cycles per second. Understanding CPU architecture isn't optional at scale. It's the difference between handling 10,000 requests per second and 100,000 requests per second on the same hardware.
+
+Memory Hierarchy and Latency
+
+Modern CPUs access memory through a multi-level hierarchy. Each level trades off size for speed.
+
+At the top of the hierarchy, CPU cores have registers. These store about 64 bytes and access takes less than 1 cycle. Next is the L1 cache, which is 32 to 64 kilobytes in size and takes about 4 cycles, or 1 nanosecond, to access. L1 is split into L1d for data and L1i for instructions.
+
+The L2 cache is larger at 256 kilobytes to 1 megabyte, but slower at about 12 cycles or 3 nanoseconds. The L3 cache is shared across all cores on the CPU. It's 8 to 64 megabytes in size and takes about 40 cycles or 10 nanoseconds to access.
+
+Below the CPU caches is main memory, or RAM, which is 16 to 512 gigabytes in size but takes about 200 cycles or 100 nanoseconds to access. Finally, SSD storage is terabyte scale but takes about 100,000 cycles or 100 microseconds to access.
+
+Here are latency numbers every engineer should know, measured in CPU cycles for a 3 gigahertz CPU. An L1 cache hit takes 4 cycles, or 1.3 nanoseconds. An L2 cache hit takes 12 cycles, or 4 nanoseconds. An L3 cache hit takes 40 cycles, or 13 nanoseconds. Main memory access takes 200 cycles, or 67 nanoseconds.
+
+For comparison, a mutex lock and unlock takes about 100 cycles or 33 nanoseconds. A context switch takes 10,000 cycles or 3 microseconds. An SSD random read takes 450,000 cycles or 150 microseconds. And a network round trip within a datacenter takes 1.5 million cycles or half a millisecond.
+
+The cache miss penalty is significant. An L1 miss that goes to L3 wastes 36 cycles. At 1 million cache misses per second, that's 36 million cycles wasted, which equals 12 milliseconds of CPU time per second.
+
+The key insight is that going to main memory is 50 times slower than L1 cache. Optimizing for cache locality can have a bigger impact than algorithmic optimizations.
+
+Cache Lines: The Fundamental Unit
+
+CPUs don't fetch individual bytes. They fetch cache lines, which are typically 64 bytes. When you access any byte in a memory address range, the entire 64-byte line is loaded into cache.
+
+Let's look at array traversal as an example. With stride 1, you access sequential elements: 0, 1, 2, 3, 4, 5, 6, 7, 8, and so on. Since a cache line contains 64 bytes and an int64 is 8 bytes, each cache line holds 8 elements. The cache line is loaded once but used 8 times. This is cache-friendly.
+
+With stride 8, you access every 8th element: 0, 8, 16, 24, and so on. Each access is in a different cache line, but they're still sequential. This is still cache-friendly, just slightly less efficient.
+
+With stride 1024, you make large jumps: 0, 1024, 2048, and so on. Each access likely evicts the previous cache line. This is cache-hostile. In benchmarks, stride 1 might take 12 milliseconds, stride 8 might take 15 milliseconds, and stride 1024 might take 45 milliseconds, which is 3 to 4 times slower due to cache misses.
+
+This phenomenon is called spatial locality. When you access memory address X, you'll likely access X plus 1, X plus 2, and so on soon after. Cache lines exploit this by prefetching nearby data.
+
+For cache-friendly data structures, consider struct of arrays, or SoA, when accessing one field across many objects. You create separate contiguous arrays for each field. For example, for users, you'd have one array for user IDs, another for ages, and another for scores. When summing ages, you get sequential access with excellent cache locality.
+
+In contrast, array of structs, or AoS, where each user object contains user ID, age, and score together, is inefficient when accessing just one field. To sum ages, you must load 24 or more bytes per user but only use 8 bytes. This gives poor cache utilization.
+
+The trade-off is that AoS is better when you access all fields together. SoA is better when you access one field across many objects.
+
+False Sharing: The Hidden Killer
+
+False sharing occurs when threads on different cores modify variables that reside in the same cache line, causing cache coherence traffic.
+
+Here's the problem. Core 0 writes to variable A in bytes 0 to 7. Core 1 writes to variable B in bytes 8 to 15. Both variables are in the same 64-byte cache line.
+
+Here's what happens over time. Core 0 loads the cache line and writes A. The line is marked dirty on Core 0. Core 1 wants to write B, so it must invalidate Core 0's cache line. Core 0's cache line is evicted and sent to Core 1. Core 1 loads the cache line and writes B. The line is marked dirty on Core 1. Now Core 0 wants to write A again, so it must invalidate Core 1's cache line. This repeats continuously.
+
+The result is that the cache line ping-pongs between cores. Throughput drops by about 100 times compared to independent cache lines.
+
+The fix is padding to separate cache lines. You can add padding arrays of 15 elements between your counters to force them into different cache lines. In benchmarks, eliminating false sharing typically gives a 3 to 10 times speedup.
+
+To detect false sharing, use perf. The command "perf c2c record" will capture cache coherence data, and "perf c2c report" will show you high cache line contention.
+
+To prevent false sharing, align data to cache line boundaries, which is 64 bytes. Or use separate arrays, one per thread, so each thread's counter is likely in a different cache line.
+
+NUMA: Non-Uniform Memory Access
+
+Modern multi-socket servers have NUMA architecture where memory access time depends on the memory's physical location relative to the CPU.
+
+In a two-socket system, CPU 0 on socket 0 has cores 0 to 15 with its own L1, L2, and L3 caches and a local memory bank of 64 gigabytes. CPU 1 on socket 1 has cores 16 to 31 with its own caches and another 64 gigabytes of memory. The sockets are connected by a QPI or UPI link.
+
+Access latency varies by location. When core 0 accesses memory bank 0, it's local and fast at about 100 nanoseconds. When core 0 accesses memory bank 1, it's remote and 1.4 times slower at about 140 nanoseconds. Similarly, core 16 accessing memory bank 0 is remote at 140 nanoseconds, but accessing memory bank 1 is local at 100 nanoseconds.
+
+In benchmarks, remote access is typically 1.3 to 1.5 times slower than local access.
+
+NUMA best practices include data partitioning, where each thread processes data allocated on its local NUMA node. Use worker affinity to pin workers to cores on the same NUMA node as their data. For shared data that all cores access, either interleave it across nodes or replicate it per-node.
+
+You can check NUMA topology with "numactl --hardware". To run a process on a specific NUMA node, use "numactl --cpunodebind=0 --membind=0" followed by your program. To interleave memory across nodes for global shared data, use "numactl --interleave=all".
+
+Branch Prediction
+
+CPUs use speculative execution to predict which branch will be taken, executing ahead to avoid pipeline stalls. When the prediction is wrong, there's a significant cost.
+
+A branch misprediction forces the CPU to flush incorrectly executed instructions and restart on the correct path. The misprediction penalty is 10 to 20 cycles of wasted work.
+
+Let's compare predictable versus unpredictable branches. With predictable, sorted data, the branch outcome is the same for long stretches. With unpredictable, random data, the branch outcome is random each time.
+
+In benchmarks, unpredictable branches are typically 2 to 3 times slower than predictable branches.
+
+To avoid branch mispredictions, you can use branchless code. Instead of if statements to clamp a value, use max and min functions. Or use NumPy's vectorized operations which have no branches per element.
+
+Another technique is to sort data first to make branches predictable. Although sorting has a cost, it's amortized if you process the data multiple times.
+
+You can also use lookup tables instead of conditionals. For example, instead of a chain of if-elif statements to score letters, create a dictionary that maps letters to scores and use a simple lookup.
+
+CPU Pinning and Affinity
+
+CPU affinity controls which cores your threads run on. This improves cache locality and reduces context switching.
+
+Without pinning, a thread starts on core 0 and loads cache. Then the OS migrates it to core 3. The cache is cold on core 3, so data must be re-loaded from memory. Then the OS migrates it back to core 0 and the cache is cold again.
+
+With pinning, the thread stays on core 0. The cache stays warm and performance is better.
+
+In Python, you can use "os.sched_setaffinity" to pin the current thread to a specific CPU core. Pass 0 for the current process and a set containing the core ID you want.
+
+For production, you can check core topology with "lscpu". To reserve cores 0 to 3 for the OS and cores 4 to 31 for your application, use the "isolcpus" kernel parameter. To check a process's thread affinity, use "taskset -cp" followed by the process ID. To set affinity when launching a process, use "taskset -c 4-7" followed by your program.
+
+Practical affinity strategies vary by use case. For I/O-bound work with variable load, use no pinning and let the default OS scheduler handle it. For CPU-bound work where you want to avoid hyperthreading, pin to physical cores like 0, 2, 4, skipping sibling cores. For workloads with large memory working sets, pin both cores and memory to the same NUMA node. For real-time, low-latency work, use exclusive cores by isolating them with "isolcpus" and pinning your workload to those cores.
+
+SIMD and Vectorization
+
+SIMD, which stands for Single Instruction Multiple Data, processes multiple data elements in parallel using vector instructions.
+
+With scalar, normal code, you add a1 plus b1 to get c1, then a2 plus b2 to get c2, then a3 plus b3 to get c3, then a4 plus b4 to get c4. This takes 4 instructions and 4 cycles.
+
+With SIMD using AVX2 with 256-bit registers, you can add all four pairs in parallel. You load a1, a2, a3, a4 into one register and b1, b2, b3, b4 into another, add them in a single instruction, and get c1, c2, c3, c4 in one cycle. This is 4 times faster.
+
+NumPy automatically uses SIMD. When you add two NumPy arrays, it uses vectorized SIMD operations. This is typically 50 to 100 times faster than Python loops.
+
+SIMD instruction sets have evolved over time. SSE2 from 2001 has 128-bit registers that can hold 2 int64s or 4 float32s. AVX from 2011 and AVX2 from 2013 have 256-bit registers that can hold 4 int64s or 8 float32s. AVX-512 from 2016 has 512-bit registers that can hold 8 int64s or 16 float32s.
+
+Use SIMD for array operations like mathematical computations, image and video processing, machine learning matrix operations, and compression or decompression. Don't use SIMD for irregular access patterns because SIMD requires contiguous data, for code with heavy branching because masks reduce SIMD efficiency, or for small datasets where the overhead isn't worth it.
+
+Profiling CPU Performance
+
+The "perf" tool on Linux is essential for CPU performance analysis.
+
+Use "perf stat" followed by your program to count CPU events. The output shows metrics like task-clock, cycles, instructions, cache-misses, and branch-misses.
+
+Key metrics to interpret include instructions per cycle, or IPC. Greater than 1.0 is good, meaning the CPU is executing efficiently. Less than 0.5 is poor, meaning the CPU is stalled due to memory access or branch mispredictions.
+
+For cache miss rate, less than 1% indicates excellent cache locality. Greater than 10% indicates poor cache locality, and you should optimize data structures.
+
+For branch miss rate, less than 2% indicates good branch prediction. Greater than 10% indicates unpredictable branches, and you should consider branchless code.
+
+To profile where time is spent, use "perf record -g" followed by your program, then "perf report" to view the results. To check cache performance specifically, use "perf stat -e cache-references,cache-misses,L1-dcache-loads,L1-dcache-load-misses" followed by your program.
+
+Flame graphs are a powerful visualization tool. To generate one, first record perf data with "perf record -F 99 -a -g -- sleep 30". Then generate the flame graph using the flamegraph scripts. The width of each box represents CPU time, with wider boxes meaning more time. The height represents call stack depth. Look for wide plateaus, which indicate hot functions where your program spends the most time.
+
+For Python-specific profiling, use cProfile to profile and save stats, then analyze with pstats. For line-by-line profiling, use the line_profiler module.
+
+Memory Barriers and Ordering
+
+Modern CPUs reorder instructions for performance. Memory barriers enforce ordering guarantees.
+
+Why does reordering happen? Consider code that sets x equals 1, then sets flag equals True, then checks if flag is True and prints x. The CPU might reorder this to set flag equals True first, then x equals 1. If another thread reads between these operations, it might print 0 instead of 1.
+
+In Python, threading primitives like locks include appropriate memory barriers, so you rarely need to worry about this explicitly. In C and C++, you need to use std::atomic with memory order specifications.
+
+Comparison of Optimization Techniques
+
+Different optimization techniques have different speedup potential and complexity.
+
+Cache-friendly data layout can give 2 to 10 times speedup with low complexity. You should always consider this.
+
+Avoiding false sharing can give 3 to 10 times speedup with low to medium complexity. Use this for multi-threaded writes.
+
+CPU pinning can give 1.1 to 1.5 times speedup with low complexity. Use this for CPU-bound work with consistent load.
+
+NUMA awareness can give 1.2 to 1.5 times speedup with medium complexity. Use this on multi-socket servers.
+
+Branchless code can give 1.5 to 3 times speedup with medium complexity. Use this when you have unpredictable branches.
+
+SIMD vectorization can give 4 to 16 times speedup with medium to high complexity. Use this for array operations.
+
+Algorithm optimization can give 10 to 1000 times or more speedup with high complexity. You should always start here.
+
+Key Concepts Checklist
+
+Can you explain the memory hierarchy including L1, L2, L3, and RAM, along with their latencies?
+
+Can you describe cache lines and spatial locality?
+
+Can you identify and fix false sharing between threads?
+
+Can you understand NUMA impact on multi-socket systems?
+
+Can you explain branch prediction and misprediction penalties?
+
+Can you use CPU affinity to improve cache locality?
+
+Can you recognize opportunities for SIMD vectorization?
+
+Can you profile CPU performance with perf and flamegraphs?
+
+Practical Insights
+
+Start with algorithms, not micro-optimizations. A better algorithm, like O of n log n versus O of n squared, will always beat cache optimizations. Profile first, optimize second. Use "perf stat" to measure before and after. Guessing is wrong 90% of the time.
+
+Cache locality often matters more than algorithmic complexity for real-world data sizes. A cache-friendly O of n squared algorithm can beat a cache-hostile O of n log n algorithm for n less than 10,000. Measure your actual data sizes and access patterns.
+
+False sharing is invisible until it's catastrophic. When adding multi-threading doesn't improve performance linearly, profile for cache coherence traffic. Padding shared data to 64-byte boundaries is cheap and often makes a 5 to 10 times difference.
+
+NUMA matters at 64 gigabytes or more of memory and 2 or more sockets. Below that, the complexity isn't worth it. Above that, use "numactl" to bind processes to nodes. For databases and caches, partition data by NUMA node and pin workers accordingly.
+
+Branch predictors are greater than 95% accurate on regular patterns. Sorting data before processing often pays for itself by making branches predictable. For random data, consider branchless alternatives or lookup tables instead of if-else chains.
+
+CPU pinning is a double-edged sword. It helps when workload is stable and CPU-bound. It hurts when workload is bursty because the OS can't load-balance, or when you pin more threads than physical cores, which causes cache thrashing. Test with and without pinning under realistic load.
+
+Python's NumPy is 50 to 100 times faster than pure Python for array operations because it uses SIMD and avoids Python interpreter overhead. If you're doing math on arrays, always use NumPy. If you need even more speed, use Numba for JIT compilation or Cython.

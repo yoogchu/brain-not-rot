@@ -1,0 +1,129 @@
+Chapter 36: Concurrency Primitives
+
+The Core Problem
+
+Your API server handles 10,000 concurrent requests. Each request needs to read from a shared cache, update a counter, and write to a connection pool.
+
+Without proper synchronization, imagine Thread A reads a counter value of 100. Then Thread B also reads the counter as 100. Thread A increments and writes 101. Then Thread B also writes 101. This is a lost update! The counter should be 102 but it's only 101.
+
+At 10,000 requests per second, you're losing hundreds of updates per second. Your metrics are wrong, your rate limiter is broken, and your connection pool is corrupted.
+
+Concurrency primitives are the building blocks that prevent this chaos. Master them, and you can build thread-safe systems. Misuse them, and you'll create deadlocks, race conditions, and subtle bugs that only appear in production at 3 AM.
+
+Race Conditions: The Fundamental Problem
+
+A race condition occurs when the behavior of code depends on the relative timing of events. This typically happens when multiple threads access shared data without proper synchronization.
+
+The classic example is the read-modify-write race. Consider a simple counter increment operation. It looks like one operation, but it's actually three: first, read the current value; second, add one to it; third, write the new value back. If two threads execute this simultaneously, their operations can interleave. Both threads read the same initial value, both add one, and both write the same result. One increment is completely lost.
+
+It's important to distinguish between data races and race conditions. A data race occurs when two threads access the same memory location, at least one is a write, and there's no synchronization. A race condition is about correctness depending on timing, like checking if a file exists and then opening it. A program can have race conditions without data races if you use locks incorrectly, and data races without race conditions if you're writing the same value.
+
+Mutex, or Mutual Exclusion Lock
+
+The mutex is the most fundamental synchronization primitive. Only one thread can hold the mutex at a time.
+
+Here's how it works. A mutex has a locked state, an owner, and a list of waiting threads. When Thread A calls lock, the mutex becomes locked with Thread A as the owner. If Thread B then calls lock, it gets added to the waiters list and is blocked, meaning it goes to sleep. When Thread A calls unlock, the mutex wakes up Thread B and makes it the new owner.
+
+In Python, you use threading.Lock. The recommended pattern is using the "with" statement: "with self.lock:" followed by your critical section. This automatically acquires the lock on entry and releases it on exit, even if an exception occurs.
+
+There are several common mutex pitfalls to avoid. First, forgetting to unlock. If you use explicit acquire and release calls instead of the "with" statement, and an exception occurs between them, the lock is never released. This is why you should always use try-finally or the "with" statement.
+
+Second, double locking. If you hold a lock and call another method that tries to acquire the same lock, you'll deadlock with yourself. This happens because a regular mutex doesn't know you're already the owner.
+
+Third, lock ordering violations. If Thread A locks X then tries to lock Y, while Thread B locks Y then tries to lock X, you get a circular wait and a deadlock.
+
+Reentrant Lock
+
+A reentrant lock, also called a recursive mutex, can be acquired multiple times by the same thread. This solves the double-locking problem.
+
+In Python, you use threading.RLock. The lock keeps track of which thread owns it and how many times it's been acquired. The owner must call unlock the same number of times they called lock to fully release it.
+
+When should you use each type? Non-reentrant locks are simpler and have less overhead. Use them for simple critical sections. Reentrant locks are needed for recursive algorithms or when methods that hold the lock call other methods that also need the lock.
+
+Semaphore
+
+A semaphore is a generalized lock that allows N concurrent accessors. It maintains a count of available permits. Acquire decrements the count if it's positive, or blocks if it's zero. Release increments the count and wakes a waiter if any.
+
+The classic use case is a connection pool. Say you have 10 database connections. You create a semaphore with count 10. When a thread needs a connection, it acquires the semaphore. If all 10 connections are in use, the thread blocks. When a thread returns a connection, it releases the semaphore, allowing another thread to proceed.
+
+A binary semaphore with count 1 looks like a mutex, but there's a key difference. A mutex has an owner, and only the owner can unlock it. A semaphore has no owner concept; any thread can release it. This makes semaphores useful for signaling between threads. A producer can release a semaphore to signal that data is ready, and a consumer can acquire it to wait for that signal.
+
+Condition Variable
+
+A condition variable allows threads to wait for a specific condition to become true. It's always associated with a mutex.
+
+The wait operation releases the lock, puts the thread to sleep, and re-acquires the lock when woken. The notify operation wakes one waiting thread. notify_all wakes all waiting threads.
+
+The classic use case is the bounded producer-consumer queue. Producers add items and consumers remove them. Consumers wait on a "not empty" condition when the queue is empty. Producers wait on a "not full" condition when the queue is at capacity. After adding an item, the producer notifies the "not empty" condition. After removing an item, the consumer notifies the "not full" condition.
+
+A critical pattern: always use "while" instead of "if" when checking the condition. After waking up, the condition might no longer be true. Another thread might have consumed the item, or it might be a spurious wakeup. The while loop re-checks the condition after every wakeup.
+
+Read-Write Lock
+
+A read-write lock optimizes for read-heavy workloads. Multiple threads can hold the read lock simultaneously, but the write lock is exclusive.
+
+The rules are: a read lock is allowed if no thread holds the write lock. A write lock is allowed only if no thread holds either lock.
+
+This is valuable for caches where reads vastly outnumber writes. With a regular mutex, readers would block each other unnecessarily. With a read-write lock, 100 readers can proceed in parallel.
+
+However, there's a policy question: what happens when a writer is waiting and new readers arrive? With reader preference, new readers are allowed, and writers can starve. With writer preference, no new readers are allowed when a writer is waiting, and readers can starve. Fair policies use strict ordering but are more complex.
+
+Spinlock
+
+A spinlock is a lock that busy-waits instead of sleeping. The thread continuously checks if the lock is available in a tight loop.
+
+This sounds wasteful, but it avoids the overhead of a context switch. Sleeping a thread and waking it up takes about 1 to 10 microseconds. If the lock will be released in less than that, spinning is actually faster.
+
+When should you use a spinlock versus a mutex? For very short critical sections, under about 1 microsecond, spinlocks win because spinning is cheaper than a context switch. For longer critical sections, mutexes win because sleeping frees the CPU for other work.
+
+In practice, spinlocks are rarely appropriate in application code. They're used in operating system kernels and lock-free data structures. For application code, stick with regular mutexes.
+
+Barriers
+
+A barrier is a synchronization point where threads wait until all have arrived. Think of it as a meeting point.
+
+The use case is parallel computation with phases. Say you have a matrix computation where phase 1 does partial work on each row, and phase 2 combines the results. All threads must finish phase 1 before any thread starts phase 2. A barrier ensures this.
+
+You create a barrier for a specific number of threads. When a thread calls wait, it blocks until all threads have called wait. Then all threads proceed together.
+
+Deadlock
+
+A deadlock is a situation where threads are blocked forever, each waiting for the other.
+
+Four conditions must be present for deadlock to occur. First, mutual exclusion: resources can't be shared. Second, hold and wait: threads hold resources while waiting for more. Third, no preemption: resources can't be forcibly taken. Fourth, circular wait: Thread A waits for B, and B waits for A.
+
+To prevent deadlock, you break one of these conditions. The most practical approach is breaking circular wait through lock ordering. Always acquire locks in a consistent global order. For example, sort accounts by ID and always lock the lower ID first. This makes circular wait impossible.
+
+Another approach is lock timeouts. Instead of blocking forever, try to acquire the lock with a timeout. If you can't get all the locks you need, release what you have and retry. This breaks the "hold and wait" condition.
+
+Lock-Free and Wait-Free Algorithms
+
+Lock-free algorithms avoid locks entirely using atomic operations. The key operation is compare-and-swap, or CAS. It atomically checks if a memory location has an expected value, and if so, updates it to a new value.
+
+A lock-free counter works by reading the current value, computing the new value, and using CAS to update it. If CAS fails because another thread modified the value, you retry with the new current value.
+
+The terminology: blocking algorithms may wait forever for a lock. Lock-free algorithms guarantee the system makes progress, but individual threads might retry indefinitely. Wait-free algorithms guarantee every thread makes progress in a bounded number of steps. Wait-free is the strongest guarantee but also the most complex to implement.
+
+Python's Global Interpreter Lock
+
+CPython has a Global Interpreter Lock, or GIL, that prevents true parallel execution of Python bytecode. Only one thread executes Python code at a time.
+
+The GIL is released during I/O operations and in C extensions like NumPy. This means threading helps for I/O-bound work, where threads spend most of their time waiting for network or disk. But for CPU-bound work, Python threads don't parallelize. They just take turns.
+
+For CPU-intensive work in Python, use the multiprocessing module, which creates separate processes with separate GILs. Or use native extensions that release the GIL.
+
+Even with the GIL, you still need concurrency primitives in Python. The GIL makes single bytecode operations atomic, but compound operations like read-modify-write are not. You still need locks to protect shared state.
+
+Practical Insights
+
+Lock granularity matters. Coarse-grained locks, one lock for an entire data structure, are simple but limit concurrency. Fine-grained locks, like per-element locks, increase concurrency but add complexity. Start coarse, measure, then refine if needed.
+
+Lock contention is often the bottleneck. If threads spend most of their time waiting on a single lock, adding more threads won't help. Profile your application and consider lock striping, which uses multiple locks for different portions of data.
+
+Deadlock debugging is painful. Always acquire locks in a consistent global order and document that order. In production, use lock timeouts to fail fast rather than hang forever.
+
+Condition variables need the while-loop pattern. Always re-check the condition after waking. Spurious wakeups happen, and notify_all can wake multiple threads when only one should proceed.
+
+Python threading is for I/O, multiprocessing is for CPU. The GIL means CPU-bound Python threads don't parallelize. Use multiprocessing for CPU-intensive work, or move hot code to native extensions.
+
+Spinlocks are rarely appropriate in application code. The break-even point is around 1 microsecond, shorter than most database queries or API calls. Use regular mutexes unless you're writing operating system code.

@@ -1,0 +1,293 @@
+Chapter 37: Async Programming and Event Loops
+
+The Core Problem
+
+Your web server handles 10,000 concurrent connections. Each request waits for database queries taking 50 milliseconds, Redis cache lookups taking 5 milliseconds, and external API calls taking 200 milliseconds.
+
+With the traditional thread per request model, you'd have 10,000 threads times 8 megabytes of stack space, which equals 80 gigabytes of memory just for stacks. Plus, context switching overhead kills CPU cache. The result is that your server can handle only about 1,000 concurrent connections maximum.
+
+With async await and event loops, you only need 1 thread with an event loop, minimal memory per connection around 4 kilobytes, and the result is that the same server can handle 100,000 or more concurrent connections. The C10K problem? Solved.
+
+The catch is that you're no longer writing sequential code. You're writing cooperative multitasking where functions voluntarily yield control. Master this paradigm shift, and you unlock massive scalability for I/O bound workloads. Misunderstand it, and you'll block the event loop, creating mysterious latency spikes that take down your entire service.
+
+Blocking versus Non Blocking I/O
+
+The Fundamental Difference
+
+Blocking I/O is the traditional approach. When you call file dot read, the thread sleeps here for milliseconds. While sleeping, the thread consumes 8 megabytes of stack, CPU time is wasted, and no other work can happen on this thread.
+
+Non blocking I/O works differently. You call file dot read async with a callback function called on data ready. This returns immediately. The operating system will call on data ready when data arrives, and the thread can handle other requests meanwhile.
+
+What Actually Happens at OS Level
+
+For blocking read, the thread calls read with a file descriptor. It enters the kernel via a system call, checks if data is available in the kernel buffer. If no data is available, the thread state becomes blocked. The thread is removed from the scheduler. The system waits for disk I/O. When a disk interrupt occurs and data is ready, the thread state becomes runnable. Eventually it gets scheduled and returns from the system call. This takes 5 to 50 milliseconds where the thread does nothing.
+
+For non blocking read, the thread calls read with the O underscore NONBLOCK flag. It enters the kernel via system call and checks if data is available. If no data is available, it returns EAGAIN immediately. The thread continues executing other code. Later, poll, select, or epoll checks file descriptor readiness. When ready, it calls the callback. This takes only microseconds and the thread stays productive.
+
+I/O Multiplexing: The Enabling Technology
+
+How does one thread monitor thousands of file descriptors?
+
+Select was the original approach from 1983. It monitors which file descriptors are ready. You create a file descriptor set, zero it out, then add socket 1, socket 2, and potentially 10,000 more sockets. You call select with the maximum file descriptor, and it returns when any file descriptor is ready. The problem is that it does an O of n scan of all file descriptors on every call.
+
+Epoll is the modern Linux approach from 2002. You register interest once using epoll control to add a socket. Then you wait for events using epoll wait, which is O of 1 for ready sockets. You get back the number of ready sockets and can handle each ready socket efficiently.
+
+Select has O of n complexity and maxes out at 1024 file descriptors due to FD underscore SETSIZE. It works on all POSIX systems. Poll has O of n scan but unlimited file descriptors and works on all POSIX systems. Epoll has O of 1 complexity, can handle millions of file descriptors, and is Linux only. Kqueue has O of 1 complexity, millions of file descriptors, and is BSD and macOS. IOCP has O of 1, millions of file descriptors, and is Windows.
+
+Event Loop: The Heart of Async
+
+An event loop is a while loop that waits for events like I/O ready or timers expired, dispatches callbacks for those events, and returns to waiting.
+
+The event loop continuously cycles through waiting for events, dispatching callbacks, executing the callback, and then repeating forever.
+
+Minimal Event Loop Implementation
+
+Here's a simplified event loop implementation. You create a class called EventLoop that initializes a selector using selectors dot DefaultSelector, which uses epoll on Linux. It maintains a list of tasks to run.
+
+You can register a socket with a callback using the register socket method. You can schedule callbacks to run on the next iteration using schedule callback.
+
+The run forever method is the main loop. It first runs all scheduled tasks by popping them from the task list and executing them. Then it waits for I/O events by calling selector dot select with a timeout. For each event that comes back, it extracts the callback and calls it with the file object.
+
+For usage, you create the event loop. You define an on client connect callback that accepts the client socket, sets it to non blocking, and registers it for reading. You define an on client readable callback that receives data, processes it, and sends a response. You create a server socket, bind it, listen, set it to non blocking, and register it with the on client connect callback. Finally, you call loop dot run forever.
+
+The key property is that this is single threaded. Only one callback runs at a time, so there are no race conditions.
+
+Coroutines: Suspendable Functions
+
+A coroutine is a function that can pause execution and resume later, preserving local state.
+
+Python Generators: The Foundation
+
+Consider a countdown generator function. It takes n and has a while loop. When n is greater than 0, it yields n, which pauses execution here and returns n to the caller, then decrements n.
+
+For usage, you create gen equals countdown of 3. When you call next of gen, it returns 3 and pauses at the yield. Call next again, it returns 2 and pauses again. Call next again, it returns 1. Calling next one more time raises StopIteration.
+
+What yield does is save the function's local variables and instruction pointer, return a value to the caller, and keep the function suspended. Calling next resumes from exactly where it left off.
+
+Generator Based Coroutines
+
+Before async await existed, Python used generator based coroutines. You'd write a function called fetch user that yields a database query. Execution pauses here until the query completes. Once resumed with the result, it returns the result.
+
+The event loop drives this. You create the coroutine object, call next to get the query object, wait for the query to complete, then call send with the query result to resume execution. When it completes, you catch StopIteration and extract the final result from the exception value.
+
+The pattern is that yield means pause me until this I/O completes. The event loop waits for I/O, then send resumes execution with the result.
+
+Native Coroutines: async await
+
+Python 3.5 and later added async await syntax sugar for coroutines. You write async def fetch user, which is an async function. Inside, you await db dot query. This is equivalent to the generator version but with clearer intent.
+
+Key differences from generators are that async def creates a coroutine function, not a generator. You can only await inside async def. And you can only call async functions with await or event loop methods.
+
+Futures and Promises
+
+A Future or Promise represents a value that will be available later. At time zero, you create an empty Future. At time 1, you start an async operation and return the Future immediately. At time 2, the operation is in progress. At time 3, the operation completes and the Future is resolved with a value. At time 4, anyone waiting on the Future gets the value.
+
+Python asyncio dot Future
+
+You create an empty Future using asyncio dot Future. You schedule something to fill it later by defining an async function that sleeps for 1 second then calls future dot set result with "Hello". You create a task for that function. Then you await the future, which blocks here until set result is called. Finally you print the result.
+
+Future states are pending when not yet resolved, fulfilled when resolved with a value, and rejected when resolved with an error.
+
+JavaScript Promise Comparison
+
+In JavaScript, you create a Promise by calling new Promise with a function that takes resolve and reject. You make your database query with a callback. If there's an error, you call reject with the error. Otherwise you call resolve with the result. For usage with async await, you write async function example, then const user equals await fetchUser of 123.
+
+Python and JavaScript both use async await syntax. Python requires an explicit event loop while JavaScript has a built in event loop in the browser or Node.js. Python has asyncio, Trio, and curio libraries. JavaScript has native Promises. Python supports task cancellation while JavaScript has no built in cancellation.
+
+Async Await: How It Really Works
+
+Desugaring async await
+
+What you write is async def fetch and process, which awaits fetch data, then awaits process with the data, then returns the result.
+
+What Python compiles to conceptually is a regular function that creates a coroutine object. The implementation is a state machine. State starts at 0. When state is 0, you start the fetch, set state to 1, and yield the future to the event loop. When state is 1, you get the sent value as data, call process with the data, set state to 2, and yield that future. When state is 2, you get the sent value as result and return it.
+
+await: The Pause Point
+
+In an example async function, you print "Start", then result equals await async operation. Execution pauses here. When the operation completes, execution resumes here and you print "Done" with the result.
+
+When you await, the current coroutine pauses, the event loop runs other coroutines and callbacks, and when async operation completes, the event loop resumes this coroutine.
+
+The critical rule is that await only pauses the current coroutine, not the entire thread.
+
+Good example: You create task 1 and task 2 concurrently using asyncio dot create task. Then you await task 1 and await task 2. They might already be done by the time you await them. The total time is the maximum of fetch 1 time and fetch 2 time, not the sum.
+
+Bad example: You await fetch user 1, which takes 50 milliseconds, then await fetch user 2, which takes another 50 milliseconds. These run sequentially. Total time is 100 milliseconds.
+
+Callback Hell and How Async Await Solves It
+
+The Callback Pyramid of Doom
+
+In JavaScript callback hell, you have deeply nested callbacks. You call getUser with a callback that checks for errors, then calls getOrders with another callback that checks for errors, then calls getOrderDetails with yet another callback, and so on. This creates rightward drift, duplicated error handling, inability to use try catch, and inability to use loops and conditionals naturally.
+
+The async await Solution
+
+With async await, you write async def process user. Inside a try block, you await get user, await get orders, await get order details, await update inventory, and await send email, then return "Success". You have a single except Exception handler for the entire chain.
+
+Benefits are linear readable code, normal try catch works, and you can use loops and conditionals naturally. The debugger can step through the code.
+
+Python asyncio in Depth
+
+Core Components
+
+The asyncio architecture has an event loop at the core, which handles task scheduling, I/O multiplexing using epoll or kqueue, and timer management. Above that are Tasks, which are wrapped coroutines, and Futures, which hold results. At the top are your coroutines, written as async def my function with await statements inside.
+
+Running Async Code
+
+To run async code, you write async def main, which prints "Hello", awaits asyncio dot sleep for 1 second, then prints "World".
+
+Method 1 is the top level runner for Python 3.7 and later. You call asyncio dot run with main.
+
+Method 2 is manual event loop management. You call get event loop, then run until complete with main, then close the loop.
+
+Creating and Awaiting Tasks
+
+For fetching data, you write async def fetch data that takes a source ID, awaits asyncio dot sleep to simulate I/O, then returns "Data from" plus the source ID.
+
+Wrong way in main: await fetch data 1, await fetch data 2, await fetch data 3 sequentially. This takes 3 seconds total.
+
+Right way: Create task 1, task 2, and task 3 using asyncio dot create task for each fetch data call. Then await asyncio dot gather with all three tasks. This runs concurrently and takes 1 second total. The results list contains "Data from 1", "Data from 2", "Data from 3".
+
+asyncio dot gather versus asyncio dot wait
+
+Gather returns results in order. You await asyncio dot gather with multiple coroutines. If any raises an exception, gather raises it immediately by default. You can pass return exceptions equals True to get exceptions in the results list instead.
+
+Wait gives you more control. You await asyncio dot wait with a list of tasks and return when equals asyncio dot FIRST underscore COMPLETED, or ALL underscore COMPLETED, or FIRST underscore EXCEPTION. It returns done and pending sets. For each task in done, you call task dot result to get the result or raise the exception.
+
+Async Context Managers
+
+You define a class called AsyncDatabaseConnection. The async enter method awaits opening a connection and returns it. The async exit method awaits closing the connection. For usage, you write async with AsyncDatabaseConnection as conn, then await conn dot query. The connection is automatically closed, even on exception.
+
+Async Iterators
+
+You define a class AsyncRange that takes n. It implements async iter that returns self, and async next that raises StopAsyncIteration when done, otherwise awaits asyncio dot sleep to simulate async work, increments i, and returns i. For usage, you write async for num in AsyncRange of 5, then print num. This prints 1, 2, 3, 4, 5 with delays.
+
+Node.js Event Loop Comparison
+
+Node.js has a more complex event loop with phases.
+
+Event Loop Phases
+
+The timers phase runs setTimeout and setInterval callbacks. The pending callbacks phase runs I/O callbacks deferred from the previous iteration. Idle and prepare are internal use only. The poll phase retrieves new I/O events and executes I/O callbacks. It blocks here waiting for I/O if no timers are scheduled. The check phase runs setImmediate callbacks. The close callbacks phase runs socket on close callbacks.
+
+Microtasks versus Macrotasks
+
+In Node.js and browser JavaScript, you log "Script start". You call setTimeout with a callback to log "setTimeout" and delay 0. This is a macrotask. You call Promise dot resolve then log "Promise 1", then log "Promise 2". These are microtasks. You log "Script end".
+
+The output is: Script start, Script end, Promise 1, Promise 2, setTimeout.
+
+The rule is that microtasks, which are Promises, run before the next macrotask.
+
+Python doesn't have this distinction. Tasks run in scheduling order.
+
+process dot nextTick in Node.js
+
+This runs before any I/O, even before Promises. If you call process dot nextTick to log "nextTick", and Promise dot resolve to log "Promise", the output is nextTick then Promise.
+
+The Python equivalent is loop dot call soon.
+
+When to Use What: Async versus Threads versus Multiprocessing
+
+Decision Tree
+
+If your workload is CPU bound with heavy computation, use multiprocessing. This bypasses the GIL, provides true parallelism on multiple cores, but has higher overhead for process creation and inter process communication.
+
+If your workload is I/O bound with network, disk, or database operations, and you have simple requirements with few connections, use threads. They have a simple mental model and work with blocking libraries.
+
+If you have many concurrent connections, more than 1000, use async await. This has low memory per connection, high scalability, but requires async libraries.
+
+If you have a mixed workload, combine approaches. Use async for I/O and offload CPU work to a thread pool or process pool.
+
+Performance Characteristics
+
+Threads use about 8 megabytes of memory per task for the stack, have context switch time of 1 to 10 microseconds, max concurrency around 1000, and are good for simple I/O with blocking libraries.
+
+Async uses about 4 kilobytes per task, has context switch time of 0.1 microseconds which is just a function call, max concurrency of 100,000 plus, and is good for high concurrency I/O.
+
+Multiprocessing uses about 50 megabytes per process, has context switch time of 10 to 100 microseconds, max concurrency equal to the number of CPU cores, and is good for CPU bound work.
+
+Code Examples
+
+For CPU bound work with multiprocessing, you import Pool from multiprocessing. You define compute heavy that takes n and returns the sum of i times i for i in range of n. In main, you create a Pool with 4 processes, then use pool dot map to compute heavy on four large numbers. This uses 4 CPU cores in parallel.
+
+For I/O bound work with async, you import asyncio and aiohttp. You define async fetch url that creates an aiohttp ClientSession, gets the URL, and returns the response text. In async main, you create a list of 100 URLs. You create tasks for each using asyncio dot create task. Then you await asyncio dot gather with all tasks. This handles 100 concurrent requests efficiently.
+
+For mixed workloads using async plus a thread pool for blocking code, you import asyncio and ThreadPoolExecutor. You define a blocking operation function that isn't async. In async main, you get the event loop and create a ThreadPoolExecutor with 4 workers. You await loop dot run in executor with the executor, the blocking operation function, and arguments. This runs blocking code in the thread pool while the event loop remains responsive for async I/O.
+
+Common Pitfalls
+
+Blocking the Event Loop
+
+Bad example: You import time and call time dot sleep for 5 seconds. This blocks the entire event loop for 5 seconds. All other coroutines are frozen.
+
+Good example: You await asyncio dot sleep for 5 seconds. This yields control while sleeping so other coroutines can run.
+
+To detect blocking, enable debug mode by calling asyncio dot run with main and debug equals True. This warns if any callback takes more than 100 milliseconds.
+
+Mixing Sync and Async Code
+
+Wrong: You can't call an async function from a sync function directly. If you try to call fetch user 123 from a sync function, you get an error.
+
+Right: Use asyncio dot run with fetch user 123 from the sync function.
+
+Wrong: You can't call sync blocking code from an async function. If you call requests dot get from an async function, it blocks the loop.
+
+Right: Use an async library like aiohttp. Create an async with aiohttp ClientSession, then async with session dot get, then await response dot text.
+
+Forgetting to await
+
+Bad example: You call fetch data without await. You print result and it shows "coroutine object fetch data at memory address". The coroutine never runs!
+
+Good example: You await fetch data. You print result and it shows "data".
+
+Python 3.11 and later warns about unawaited coroutines.
+
+Not Handling Exceptions in Tasks
+
+Bad example: You create a task that raises ValueError. If you don't await the task, the exception is swallowed. No error is visible!
+
+Good example: You create the task, then in a try block you await the task. In except ValueError, you log the error.
+
+Race Conditions in Async Code
+
+Even single threaded async code has race conditions! Consider a Counter class with a value starting at 0. The increment method reads self dot value into temp, awaits asyncio dot sleep 0 which yields control, then sets self dot value to temp plus 1. If two coroutines call increment concurrently, they might both read 0, then both write 1. The result is a lost update.
+
+The solution is to use asyncio dot Lock. Define SafeCounter with a lock. In the increment method, use async with self dot lock. Now the entire read modify write sequence is protected.
+
+Async Best Practices
+
+Use async libraries for everything. For HTTP, use aiohttp or httpx. For databases, use asyncpg for Postgres, motor for MongoDB, aiosqlite for SQLite. For Redis, use aioredis. For files, use aiofiles.
+
+Limit concurrent operations. Bad example: Launch 10,000 concurrent requests all at once. This will overload the system. Good example: Use asyncio dot Semaphore with 100 to limit to 100 concurrent operations. Define fetch limited that uses async with semaphore, then calls fetch url. Create tasks for fetch limited instead of fetch url directly.
+
+Set timeouts. Use asyncio dot wait for with fetch data and timeout equals 5.0. If it times out, catch asyncio dot TimeoutError and handle it.
+
+Cancel tasks on shutdown. In async main, create your tasks, then in a try block await gather on all tasks. In except KeyboardInterrupt, loop through all tasks and call task dot cancel. Then await gather with all tasks and return exceptions equals True to wait for cancellation to complete.
+
+Comparison Table
+
+Threads have preemptive concurrency, no parallelism due to the GIL, high memory overhead at 8 megabytes per thread, OS scheduler context switch in microseconds, race conditions due to preemption, use case is simple I/O, harder debugging due to preemption, and all sync libraries work.
+
+Async await has cooperative concurrency, no parallelism, low memory overhead at 4 kilobytes per coroutine, function call context switch in nanoseconds, race conditions at await points, use case is high concurrency I/O, easier debugging with explicit yields, and only async libraries work.
+
+Multiprocessing has parallel execution model, true parallelism, very high memory overhead at 50 megabytes per process, OS scheduler context switch in microseconds, no race conditions due to separate memory, use case is CPU bound work, harder debugging due to inter process communication, and all libraries work.
+
+Key Concepts Checklist
+
+Explain blocking versus non blocking I/O at the OS level. Describe how an event loop works internally. Understand coroutines and how await pauses execution. Choose between async, threads, and multiprocessing for a given scenario. Identify code that blocks the event loop. Use asyncio dot gather and asyncio dot wait correctly. Handle exceptions in async tasks. Recognize that async code can still have race conditions.
+
+Practical Insights
+
+Event loop overhead is minimal. A well tuned async server can handle 100,000 or more concurrent connections on a single core. The bottleneck is usually your backend services like database and cache, not the event loop itself.
+
+Async is contagious. Once you have one async function, everything that calls it must also be async. This is by design. You can't accidentally block the event loop. But it means partial async adoption is painful. Go all in or don't go at all.
+
+The GIL makes Python async less powerful than Node.js for pure compute. JavaScript engines can optimize tight async loops better. But Python's async shines for I/O bound work, where the bottleneck is network or disk, not CPU.
+
+FastAPI's async is optional but recommended. You can write def sync endpoints that run in a thread pool, or async def endpoints that run on the event loop. Use async def for I/O bound endpoints like database queries and API calls. Use def only for CPU bound work or when calling blocking libraries.
+
+Monitor event loop lag. If the event loop spends more than 10 milliseconds between iterations, you're blocking somewhere. Use asyncio dot run with main and debug equals True in development to detect slow callbacks. In production, instrument with Prometheus metrics like event underscore loop underscore lag underscore seconds.
+
+Async doesn't magically make code faster. It makes code handle more concurrency with less memory. If you have 10 requests and each takes 100 milliseconds, async completes in 100 milliseconds with all running concurrently. Threads also complete in about 100 milliseconds because the OS parallelizes I/O waits. The difference appears at scale. With 10,000 requests, async uses 40 megabytes while threads need 80 gigabytes.
+
+This concludes Chapter 37 on Async Programming and Event Loops.
