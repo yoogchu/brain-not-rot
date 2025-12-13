@@ -1,0 +1,211 @@
+Chapter 18: Batch versus Stream Processing
+
+The Processing Time Paradox
+
+Imagine this scenario: Your data team reports success on Monday morning at 9 AM. They tell you: "Sales report completed! Revenue from yesterday was 2.3 million dollars." You check the live dashboard and see that current revenue on Monday at 9 AM is already 500 thousand dollars. The business then asks an important question: "What was revenue at 8 AM? At 8:30 AM?" The batch job can only answer: "I don't know. I only run once daily."
+
+Meanwhile, your fraud detection system needs to block suspicious transactions BEFORE they complete. But batch processing can only tell you: "I'll let you know tomorrow if yesterday's transactions were fraudulent." The result? Millions of dollars lost. Customers angry. Regulators investigating.
+
+Batch processing trades freshness for simplicity. Stream processing trades simplicity for freshness. The right choice depends on whether you can afford to wait.
+
+Batch Processing Fundamentals
+
+The MapReduce Model
+
+The Problem: If you try to process terabytes of data on a single machine, it takes weeks. If you process in parallel across 1000 machines, you need to coordinate everything, handle failures, and aggregate results.
+
+How MapReduce Works: The MapReduce model takes your input data, let's say 10 terabytes, and splits it into chunks. Each chunk goes to a separate mapper. These mappers process their chunks independently. Then there's a shuffle and sort phase that groups related data together. After that, reducers process each group of related data. Finally, all the results are combined into output data.
+
+Let me explain this with a word count example. The map function takes a document and splits it into individual words. For each word, it emits a pair consisting of the word and the number 1. The reduce function takes a word and all the counts associated with it, then sums them up. The MapReduce framework handles all the complexity of distributing input chunks to mappers, shuffling map output by key to reducers, and handling failures, retries, and slow workers.
+
+In a simplified single-machine version to show the pattern, the map phase processes each document and groups intermediate results by key. Then the reduce phase processes each key and its associated values to produce final results. For example, if you have three documents containing the words "hello world hello", "world of batch processing", and "hello batch world", the result would show that "hello" appears 3 times, "world" appears 3 times, "batch" appears 2 times, "of" appears once, and "processing" appears once.
+
+The trade-offs of MapReduce are significant. For latency, it can amortize cost over large batches, but this means hours to days of delay. For throughput, it's very high and can process terabytes per hour, but it's not applicable for real-time use cases. For fault tolerance, it can recompute lost partitions, but the entire job fails if the output write fails. For resource usage, you can use spot instances and batch jobs, but it wastes resources if data trickles in slowly.
+
+When to use MapReduce: Use it for daily or hourly reports, ETL jobs, model training, and log analysis where latency doesn't matter.
+
+When NOT to use MapReduce: Don't use it for real-time dashboards, fraud detection, alerting, or user-facing features.
+
+Apache Spark Architecture
+
+The Problem: MapReduce writes intermediate results to disk between stages. For iterative algorithms like machine learning and graph processing, this is extremely slow.
+
+How Spark Works: Spark keeps intermediate data in memory using Resilient Distributed Datasets, or RDDs for short. The architecture has a driver program with a SparkContext that creates the execution plan and schedules tasks. Below that are multiple workers, each running an executor that has a cache and runs tasks. These all connect to distributed storage like HDFS or S3.
+
+Here's how you'd use Spark for sales analysis. First, you initialize Spark with configuration for executor memory and cores. Then you read data from S3 in Parquet format. The important thing is that this is lazy - it doesn't execute yet. You then define transformations like grouping by date and product ID, aggregating to count orders and sum revenue, filtering for revenue over 1000 dollars, and ordering by revenue descending. These are all lazy and just build an execution plan. The action that triggers execution is writing the results back to S3 as Parquet files.
+
+For iterative algorithms, Spark's caching is a game-changer. You can read user features and call cache to keep them in memory across iterations. Then when you run a loop with 10 iterations to train a model, it reuses the cached data, making it 10 times faster than re-reading from disk each time.
+
+Key concepts in Spark include lazy evaluation, where you build an execution plan, optimize it, then execute. There's lineage, which tracks transformations to recompute lost partitions. Caching persists intermediate results in memory. And there are wide versus narrow transformations. Narrow transformations like map and filter don't need a shuffle, while wide transformations like groupBy and join require shuffling data across the network.
+
+Stream Processing Fundamentals
+
+Event Time versus Processing Time
+
+The Problem: Events are generated at time T1 but arrive at the processor at time T2. Which timestamp matters?
+
+Consider this example: A user clicks "buy" at 11:59:50 PM on December 31st. Due to network delay and server queuing, the event arrives at 11:00:10 AM on January 1st. The question is: Was this a December sale or a January sale? If you use processing time, you'd count it as January, which is wrong. If you use event time, you'd count it as December, which is correct.
+
+Event time is when the event actually occurred. This is critical for correctness. Processing time is when the event was processed. This is easier to implement but can be misleading.
+
+Event time matters for financial transactions where regulation requires accurate timestamps, for analytics across timezones where you need to count daily active users by the user's timezone, and for SLA tracking where you need to measure from when the request started, not when you saw it.
+
+Windowing Strategies
+
+The Problem: Streams are infinite. To compute aggregates like count, sum, or average, you need to group events into finite chunks.
+
+Tumbling Windows are fixed-size, non-overlapping windows. Imagine time from 0 seconds to 10 seconds divided into windows. Window 1 covers 0 to 3 seconds, Window 2 covers 3 to 6 seconds, and Window 3 covers 6 to 9 seconds. If events A, B, C, D, E, F, G, H, I, J arrive at different times, Window 1 contains A, B, and C. Window 2 contains D, E, and F. Window 3 contains G, H, and I. The use case for tumbling windows is throughput metrics like requests per minute and hourly aggregates.
+
+Sliding Windows are fixed-size but overlapping windows. For example, with a 3-second window size and a 1-second slide, Window 1 covers 0 to 3 seconds, Window 2 covers 1 to 4 seconds, Window 3 covers 2 to 5 seconds, and so on. Events at 1 second, 2 seconds, and 3 seconds appear in multiple windows. The use case for sliding windows is moving averages and rolling metrics like CPU utilization over the last 5 minutes.
+
+Session Windows have dynamic size based on inactivity gap. Imagine user activity with events A, B, C, then a gap longer than 30 seconds, then events D and E, another gap, then events F, G, H. Session 1 contains A, B, C because the user was active, then there's a 30-second gap. Session 2 contains D and E, followed by another gap. Session 3 contains F, G, and H. The use case for session windows is user sessions, shopping cart analysis, and clickstream tracking.
+
+Here's how you'd implement a tumbling window. You create a class that stores windows as a dictionary mapping window start times to lists of events. To determine which window an event belongs to, you align the event time to the window start by dividing the timestamp by the window size and multiplying back. When adding an event, you find its window start and append it to that window's list. To get complete windows, you check which windows have closed based on the current time and return those, removing them from the active windows.
+
+For example, with 1-minute windows, you'd process the event stream, adding each event to its window. Periodically, you'd emit completed windows by checking which ones have closed and printing the count of events in each.
+
+Watermarks and Late Data
+
+The Problem: In distributed systems, events arrive out of order. How long do you wait for late data before computing a window result?
+
+Consider a window from 10:00 to 10:01 in event time. Events arrive at different processing times. At 10:01:05 processing time, you receive an event from 10:00:30 event time - this is on time. At 10:01:10, you get an event from 10:00:45 - still on time. At 10:01:15, you receive an event from 10:00:20 - this is late, but might be within a grace period. At 10:05:00, you get an event from 10:00:55 - this is very late. Should you include it or drop it?
+
+A watermark is a threshold saying "I've seen all events up to time T." For example, with a watermark strategy of event time minus 1 minute, if the current processing time is 10:03, the watermark is at 10:02. This means "All events before 10:02 have arrived" and "It's safe to emit results for the 10:00 to 10:01 window." If an event from 10:01:30 arrives at 10:04, it's after the watermark, so it's considered late data.
+
+Handling late data involves trade-offs. You need to decide on an allowed lateness period. If an event is too late, beyond the watermark minus the window size, you drop it. Otherwise, you add it to the appropriate window. You emit windows that have passed the watermark and haven't been emitted yet.
+
+The trade-off is: with small allowed lateness, you get results fast but drop late data. With large allowed lateness, you include late data but results are delayed.
+
+Use event time for financial transactions where accuracy is critical, for analytics across timezones, and when processing historical data or backfilling. Use processing time for monitoring current system state and simple aggregations where slight inaccuracy is acceptable.
+
+Exactly-Once Semantics
+
+The Problem: A stream processor crashes after processing an event but before marking it as consumed. After restart, should you process it again or skip it?
+
+Consider an event that says "Transfer 100 dollars from Account A to Account B." With at-most-once processing, you might lose the event and the money disappears. With at-least-once processing, you might duplicate the event and 100 dollars gets transferred twice. With exactly-once processing, the event is processed exactly once and 100 dollars is transferred once.
+
+There are three approaches to achieving exactly-once semantics.
+
+First, idempotent processing makes duplicate processing safe. A non-idempotent approach would just subtract the amount from account A and add it to account B. If processed twice, this causes a double transfer. An idempotent approach first checks if the event ID has already been processed. If so, it returns early. Otherwise, it uses a database transaction to subtract from account A, add to account B, and record the event ID as processed. If processed twice, the second time is a no-op.
+
+Second, transactional processing with Kafka and a database atomically commits both the consumption offset and the processing result. You disable auto-commit in Kafka and use read committed isolation level. For each message, you start a database transaction, process the event by updating both accounts, and store the Kafka offset in the same transaction. If the commit succeeds, both processing and offset are stored. If it fails, neither is stored and the message will be reprocessed.
+
+Third, two-phase commit using Flink checkpointing periodically snapshots the entire processing state. At regular intervals like every 5 seconds, Flink creates checkpoints. If a crash happens, say at 15 seconds, when you restart at 20 seconds, you restore from the last checkpoint at 10 seconds and replay events from that point.
+
+Architecture Patterns
+
+Lambda Architecture
+
+The Problem: Batch processing is accurate but slow. Stream processing is fast but complex. Can we have both?
+
+Lambda architecture has a data source like Kafka that splits into two layers. The batch layer uses something like Spark to process complete data with high latency but high accuracy. The speed layer uses something like Flink to process recent data with low latency but approximate results. The batch layer writes to batch views stored in Hive or Parquet. The speed layer writes to real-time views in Redis or Druid. Finally, a serving layer merges both views to answer queries.
+
+Here's how it works in practice. To query revenue for a date and product, you first get the batch view with complete historical data from before today. Then you get the real-time view with incomplete recent data from today. Finally, you merge both to get the total. The batch layer recomputes every 24 hours, the speed layer maintains the last 24 hours, and at query time you merge both.
+
+The trade-offs are: For accuracy, the batch layer is the source of truth, but you must maintain two codebases. For latency, the speed layer provides real-time results, but you need complex merge logic at query time. Operationally, batch jobs are easier to debug, but you have doubled infrastructure cost.
+
+Use Lambda architecture for data analytics platforms where you need both historical accuracy and real-time updates. Don't use it when you can achieve latency goals with pure stream or pure batch processing.
+
+Kappa Architecture
+
+The Problem: Lambda architecture requires maintaining two processing pipelines. Can we use only stream processing?
+
+Kappa architecture has a data source in Kafka that goes to a single stream layer using Flink. This processes all data with low latency and writes to a serving layer with databases and caches. For historical reprocessing, you keep events in Kafka with long retention, deploy a new version of the stream processor, and replay from the beginning.
+
+Use Kappa architecture when stream processing latency is acceptable for all use cases, when you can afford Kafka storage for full history, and when you want a single codebase. Don't use it when you need complex batch algorithms like ML training or graph analysis, or when you can't afford stream processing infrastructure for all data.
+
+Stream Processing Frameworks Comparison
+
+Apache Kafka Streams
+
+Kafka Streams is a library, not a framework. It runs in your application. You create a Kafka consumer and producer, maintain a local state store using RocksDB, and for each message you update the state and emit results.
+
+The characteristics are: no separate cluster needed because it deploys with your app, exactly-once semantics via Kafka transactions, state stored in local RocksDB plus a changelog topic, and it scales by adding more app instances.
+
+Apache Flink
+
+Flink is a separate cluster with a JobManager and TaskManagers. You get a stream execution environment, enable checkpointing every 60 seconds, define the stream source, apply transformations like mapping and keying by user ID, then add a sink to write results.
+
+The characteristics are: true streaming, not micro-batches, very low latency in milliseconds, advanced features like event time, watermarks, and state management, exactly-once via distributed snapshots, but it's complex to operate.
+
+Apache Spark Streaming
+
+Spark Structured Streaming uses a micro-batch processing model, treating the stream as incremental batches. You read a stream from Kafka, apply windowed aggregations grouping by time windows and user ID, then write the stream back to Kafka with checkpointing.
+
+The characteristics are: micro-batch processing with 100 milliseconds or more latency, the same API as batch Spark making it easy to learn, exactly-once via write-ahead log and checkpoints, and good for around 1-second latency requirements.
+
+Technology Comparison
+
+Comparing these frameworks across several dimensions:
+
+For processing model: Spark uses micro-batch, Flink and Kafka Streams use true streaming, and Beam is an abstraction layer.
+
+For latency: Spark has 100 milliseconds to 1 second, Flink and Kafka Streams have sub-second latency, and Beam depends on the runner.
+
+For throughput: Spark has very high throughput, Flink has high throughput, Kafka Streams has medium throughput, and Beam depends on the runner.
+
+All four support exactly-once semantics, though for Beam it depends on the runner.
+
+For state management: Spark uses in-memory plus checkpoints, Flink uses RocksDB plus snapshots, Kafka Streams uses RocksDB plus changelog, and Beam depends on the runner.
+
+For deployment: Spark uses a cluster on YARN or Kubernetes, Flink uses a cluster on Kubernetes or standalone, Kafka Streams is just a library with no cluster needed, and Beam depends on the runner.
+
+For operational complexity: Kafka Streams is low, Spark is medium, Beam is medium, and Flink is high.
+
+All support event time, with Flink having best-in-class support.
+
+For SQL support: Spark has excellent support, Flink has good support, Kafka Streams has separate KSQL, and Beam has basic support.
+
+Spark is best for batch plus stream hybrid workloads. Flink is best for low-latency streaming. Kafka Streams is best for microservices plus streaming. Beam is best for multi-cloud portability.
+
+When choosing a framework: If you need less than 100 milliseconds latency, use Flink. If you're already using Spark for batch, use Spark Structured Streaming. For simple stateful processing in microservices, use Kafka Streams. If you want cloud portability, use Beam which runs on Dataflow, Flink, or Spark.
+
+Checkpointing and Fault Tolerance
+
+The Problem: A stream processor crashes. How do you resume without losing data or duplicating processing?
+
+Flink's checkpoint mechanism works like this: You have a processing pipeline from source to transform to sink. During the checkpoint process, the JobManager triggers checkpoint N. The source marks its current position, like the Kafka offset. Each operator saves its state to durable storage. The sink saves its output position. Once checkpoint N is complete, if there's a crash, you restore state from the latest checkpoint N, rewind the source to checkpoint N offset, and replay events from the checkpoint to now.
+
+In configuration, you enable checkpointing every 60 seconds, set the checkpoint storage directory to S3, configure minimum pause between checkpoints, set checkpoint timeout, and configure a restart strategy to try 3 times with 10 seconds wait between attempts.
+
+For checkpoint tuning: The checkpoint interval trade-off is that too frequent checkpointing creates high overhead and slow processing, while too infrequent checkpointing means long recovery time after failure. The rule of thumb is 1 to 5 minutes for most workloads.
+
+For checkpoint size, large state means long checkpoint time. The solution is incremental checkpoints that only save changed state.
+
+For state backend, you have three options: MemoryStateBackend is fast but limited by heap, FsStateBackend is slower with no size limit, and RocksDBStateBackend handles the largest datasets using disk-based storage.
+
+State Management
+
+The Problem: Stateless processing is easy - operations like map and filter are simple. But stateful processing for count, join, or sessionization needs to store data across events.
+
+There are two main state types.
+
+Keyed State is partitioned by key like user ID or session ID. You create a state descriptor and use it to read the current count for a key. You update it, save the new value, and emit the result. This way each key maintains its own count.
+
+Operator State is shared across all keys. It's useful for source and sink offsets. For example, a Kafka source with checkpointing would restore the offset from a checkpoint, use it to poll messages, and during checkpointing would save the current offset.
+
+State size management is critical. The problem is that state can grow unbounded and eventually cause out-of-memory errors.
+
+Solution 1 is Time To Live, or TTL. You configure state to automatically expire after a certain period, like 7 days. You set when to update the TTL and configure that expired state is never returned.
+
+Solution 2 is manual cleanup. You register a timer to clean up old data. When the timer fires, you clear the state for data older than the retention period.
+
+Key Concepts Checklist
+
+Here are the key concepts you should understand: First, understand when to use batch versus stream processing. Second, explain the MapReduce model and Spark's improvements including in-memory processing and lazy evaluation. Third, describe windowing strategies including tumbling, sliding, and session windows. Fourth, explain event time versus processing time and watermarks. Fifth, compare exactly-once approaches including idempotency, transactions, and checkpointing. Sixth, contrast Lambda versus Kappa architecture. Seventh, compare Spark versus Flink versus Kafka Streams for different use cases. Eighth, design a checkpointing strategy for fault tolerance. Ninth, manage state size and lifecycle in stream processing.
+
+Practical Insights
+
+Batch versus stream is a spectrum, not binary. Micro-batching with Spark batches every 100 milliseconds. True streaming with Flink processes each event individually. Hybrid approaches like Lambda use both batch and stream. Choose based on latency requirements, not ideology.
+
+The event time and watermark trap: You implement event time processing, but events arrive out of order by hours because mobile devices go offline. Your watermark strategy allows 1-hour lateness. The result is that all windows are delayed by 1 hour, which defeats the purpose of streaming. The solution is to use processing time for real-time dashboards, use event time for accurate financial and analytics systems, and separate the hot path for recent, fast data from the cold path for historical, accurate data.
+
+State is the hardest part. State grows unbounded leading to out-of-memory errors. State takes forever to checkpoint, causing processing to stall. State gets corrupted, leading to silent data errors. Monitor state size per key and alert on outliers. Use TTL aggressively - most stream analytics don't need infinite history. Test recovery by killing random workers and verifying results are correct.
+
+Backpressure and resource tuning: If your source produces 100 thousand events per second but your processor only handles 50 thousand events per second, the result is unbounded growth in queues leading to out-of-memory errors. Solutions include: scaling out with more parallel instances, scaling up with more CPU and memory per instance, using backpressure to slow down the source through Kafka consumer lag, or load shedding by dropping low-priority events. Monitor consumer lag to see if the source can't keep up, task backpressure time to see if operators can't keep up, checkpoint duration to see if state is too large, and garbage collection time to see if there's heap pressure.
+
+Choosing checkpoint intervals involves understanding checkpoint overhead. Pausing processing takes 100 milliseconds to 5 seconds depending on state size. Writing to S3 or HDFS costs network bandwidth. Recovery time includes 1 to 10 minutes to restore from checkpoint, plus time proportional to the interval to replay events since the checkpoint. If you checkpoint every 1 minute, overhead is 100 milliseconds per 60 seconds, which equals 0.16 percent of CPU, and recovery requires replaying 1 minute of data. If you checkpoint every 30 minutes, overhead is 100 milliseconds per 1800 seconds, which equals 0.005 percent of CPU, which is better, but recovery requires replaying 30 minutes of data, which is worse. The rule of thumb is: for high-throughput systems use 5 to 10 minute checkpoints, for low-throughput systems use 1 to 2 minute checkpoints, and for critical systems use 30 to 60 second checkpoints with incremental mode.
+
+When NOT to use stream processing: Don't use it for ML model training, which needs the full dataset and is iterative, making batch better. Don't use it for complex joins across many datasets, where batch SQL is simpler. Don't use it for ad-hoc analysis where analysts are querying a data warehouse. Don't use it when you can tolerate daily or hourly latency, because batch is cheaper and simpler.
+
+Kafka retention for Kappa architecture: With 1 terabyte per day ingestion, 7-day retention means 7 terabytes of storage, and 30-day retention means 30 terabytes. With replication factor 3, that's 90 terabytes total. Kafka storage is relatively cheap. But reprocessing 30 days takes 30 times longer than reprocessing 1 day. The strategy is to use a hot tier in Kafka with 7 to 14 days retention for fast reprocessing, and a cold tier in S3 or HDFS with infinite retention for batch reprocessing. Use Kafka for bug fixes and S3 for major rewrites.

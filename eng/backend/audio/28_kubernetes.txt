@@ -1,0 +1,127 @@
+Chapter 28: Container Orchestration with Kubernetes
+
+Why Kubernetes?
+
+Imagine you're running a production application without orchestration. If you need to deploy to 50 servers, you have to do it manually on each one. When a server dies, you have to manually restart the service somewhere else. To scale up, you need to provision new servers, deploy your application, and configure everything by hand. And when you want to do a rolling update, you just pray nothing breaks.
+
+With Kubernetes, everything changes. You simply tell Kubernetes to run 10 replicas of your application, and it figures out where to place them. When a pod dies, Kubernetes restarts it automatically. To scale up, you just run a single command like "kubectl scale deployment slash app dash dash replicas equals 20". And rolling updates happen with zero downtime by default.
+
+Core Concepts
+
+Let's start with Pods.
+
+A pod is the smallest deployable unit in Kubernetes. It consists of one or more containers that share resources. Specifically, containers in a pod share the same network namespace, meaning they have the same IP address and can communicate over localhost. They also share storage volumes and have the same lifecycle - they start and stop together.
+
+Picture a pod as a wrapper around your containers. Inside the pod, you might have your main application container alongside a sidecar container that handles logging. These two containers can talk to each other over localhost because they're in the same network namespace, and they can also access shared storage volumes.
+
+When you define a pod, you specify it using a YAML configuration. You set the API version to v1 and the kind to Pod. In the metadata section, you give it a name like "my-app" and add labels such as "app: my-app". In the spec section, you define your containers. For each container, you specify a name, the container image like "my-app version 1.2.3", and the ports it exposes, such as port 8080. You also define resource requests and limits. For example, you might request 128 megabytes of memory and 100 millicores of CPU, which is one-tenth of a CPU core. The limits might be 256 megabytes of memory and 500 millicores of CPU.
+
+Moving on to Deployments.
+
+A deployment manages replica sets, which in turn manage pods. Think of it as a hierarchy where the deployment sits at the top, controlling replica sets, and each replica set controls the actual pod instances.
+
+Here's how it works: imagine you have a deployment that manages two replica sets. The newer replica set, version 2, is running three pods because you specified three replicas. Meanwhile, the older replica set from version 1 is scaling down and might have just one pod left that's in the process of draining.
+
+When you create a deployment, you specify how many replicas you want. The deployment uses a selector with match labels to find the pods it should manage. In the template section, you define what each pod should look like - this is essentially the same pod spec we discussed earlier. But deployments add important features like readiness probes and liveness probes.
+
+A readiness probe checks if your application is ready to receive traffic. You might configure it to make an HTTP GET request to the /health endpoint on port 8080, starting 5 seconds after the container starts and checking every 10 seconds. A liveness probe checks if your application is still alive and healthy. You might configure it similarly but with an initial delay of 15 seconds and checking every 20 seconds.
+
+Now let's talk about Services.
+
+The problem with pods is that they have dynamic IP addresses and they come and go as they're created and destroyed. The solution is a service, which provides a stable endpoint.
+
+A service acts as a load balancer in front of your pods. It gets a stable cluster IP address like 10.96.0.1 and listens on a specific port like port 80. When traffic comes to the service, it distributes that traffic across all the matching pods. If you have three pods running your application on port 8080, the service will round-robin traffic to all three.
+
+The service also gets a DNS name within the cluster. For a service named "my-app-service" in the default namespace, the full DNS name would be "my-app-service dot default dot svc dot cluster dot local". But within the same namespace, you can just refer to it as "my-app-service".
+
+There are four types of services. ClusterIP is the default and makes the service accessible only within the cluster - this is perfect for service-to-service communication. NodePort exposes the service on each node's IP address at a specific port - this is useful for development or simple access patterns. LoadBalancer provisions a cloud load balancer and is what you'd use for production external access. And ExternalName creates a DNS alias to an external service.
+
+When you define a service, you specify the type, a selector that matches pods with specific labels, and the port configuration. The service port is what clients connect to, and the target port is the actual port on the pods.
+
+Let's discuss Ingress next.
+
+An ingress defines HTTP routing rules. It sits at the edge of your cluster and routes incoming internet traffic to different services based on the URL path or hostname.
+
+Think of the flow like this: traffic from the internet hits the ingress controller. The controller looks at the request and decides where to route it based on your rules. Requests to /api/* might go to your API service, requests to /web/* go to your web service, and everything else goes to a default service.
+
+In the ingress configuration, you can specify TLS settings for HTTPS, including which certificate to use. You define rules based on hostnames like example.com, and for each hostname, you specify path-based routing. A path like /api with a Prefix type means any request starting with /api will be routed to the api-service on port 80.
+
+ConfigMaps and Secrets
+
+Kubernetes provides two ways to manage configuration data. ConfigMaps are for non-sensitive configuration, while Secrets are for sensitive data like passwords and API keys.
+
+A ConfigMap can store simple key-value pairs like DATABASE_HOST equals "postgres.default.svc" and LOG_LEVEL equals "info". You can also store entire configuration files as multi-line strings.
+
+Secrets work similarly but the data is base64 encoded. For example, you might store a DATABASE_PASSWORD or API_KEY. The encoding is just obfuscation though, not real encryption, so you should use additional security measures in production.
+
+To use these in your pods, you have two options. You can inject them as environment variables, where each environment variable references a specific key from a ConfigMap or Secret. Or you can mount them as files using volumes, which is useful when you have configuration files that your application needs to read from disk.
+
+Resource Management
+
+One of the most important aspects of running containers in Kubernetes is managing CPU and memory resources properly. You specify both requests and limits for each resource.
+
+Requests are the guaranteed resources used for scheduling. When you request 128 megabytes of memory and 100 millicores of CPU, Kubernetes will only schedule your pod on a node that has at least that much available. Limits are the maximum allowed, acting as a hard cap.
+
+The behavior differs between CPU and memory. For CPU, the request guarantees you'll get that much CPU time, and if you exceed the limit, you'll be throttled but not killed. For memory, the request guarantees that amount, but if you exceed the limit, your pod will be killed with an Out Of Memory error.
+
+Kubernetes also has a concept called Quality of Service, or QoS, which determines which pods get evicted first when a node runs out of resources. Pods are classified into three categories.
+
+Guaranteed QoS applies when your requests equal your limits for all containers. These pods are the last to be evicted because they have strict resource requirements. Burstable QoS applies when requests are less than limits for any container, meaning the pod can use more than requested but has an upper bound. These are evicted after BestEffort pods. BestEffort QoS applies when you don't specify any requests or limits - these pods are first to be evicted when resources are tight.
+
+Deployment Strategies
+
+Kubernetes supports several strategies for updating your applications. The default is Rolling Update.
+
+With a rolling update, you configure two parameters: maxSurge and maxUnavailable. MaxSurge is the maximum number of pods you can have above your desired replica count, and maxUnavailable is the maximum number below.
+
+Here's how it works step by step. Say you have 4 replicas running version 1 and you want to update to version 2. With a 25% maxSurge, Kubernetes first creates one new version 2 pod, so now you have 5 pods total. Then it terminates one version 1 pod and starts another version 2 pod. This continues until all pods are running version 2. The process is gradual and ensures you always have most of your capacity available.
+
+Blue-Green deployment is another strategy. You maintain two complete environments. The blue environment runs the current version with all replicas, and this is where your service currently points. You then deploy the green environment with the new version and all its replicas. You can test the green environment thoroughly. When you're ready, you switch the service to point to green instead of blue, which happens instantly. If something goes wrong, you can quickly roll back by switching the service back to blue.
+
+To implement blue-green in Kubernetes, you create two separate deployments, one labeled as blue and one as green. Your service uses a version label in its selector. To switch versions, you just update the service's selector from "version: blue" to "version: green".
+
+Canary deployments let you gradually roll out changes by routing a small percentage of traffic to the new version first. You might keep 90% of your pods on version 1 and deploy just 10% on version 2. You monitor error rates and latency for the canary pods. If everything looks good, you gradually increase the percentage of version 2 pods. If not, you route 100% of traffic back to version 1.
+
+For sophisticated canary deployments, you'd typically use a service mesh like Istio, which lets you control the exact percentage of traffic going to each version using virtual services and traffic weights.
+
+Health Checks
+
+Kubernetes provides three types of health checks, or probes, to monitor your containers.
+
+Liveness probes determine if a container is still alive. You might configure it to make an HTTP GET request to /healthz on port 8080. You set an initial delay of 15 seconds before the first check, then check every 20 seconds. If the probe fails three consecutive times, which is the default failure threshold, Kubernetes restarts the container.
+
+Readiness probes determine if a pod is ready to receive traffic. You might check the /ready endpoint every 10 seconds after an initial delay of 5 seconds. If the probe fails, the pod is removed from the service endpoints so it stops receiving traffic, but the container isn't restarted.
+
+Startup probes are for slow-starting containers. Some applications take a long time to initialize, and you don't want liveness or readiness checks to fail during that startup period. The startup probe runs first with a higher failure threshold - maybe 30 failures with checks every 10 seconds, giving the app up to 5 minutes to start. Only after the startup probe succeeds do the liveness and readiness probes begin.
+
+Scaling
+
+Kubernetes provides automatic scaling through the Horizontal Pod Autoscaler, or HPA.
+
+You define an HPA by specifying which deployment to scale, the minimum and maximum number of replicas, and the metrics to watch. Common metrics are CPU and memory utilization. For example, you might say you want to maintain an average CPU utilization of 70% and memory utilization of 80%.
+
+The HPA calculates the desired number of replicas using a formula. If you currently have 3 pods with 90% average CPU utilization and your target is 70%, the calculation is: 3 pods times 90 divided by 70, which equals 3.86, rounded up to 4 pods. So the HPA scales up to 4 pods.
+
+There's also Vertical Pod Autoscaler, or VPA, which adjusts the resource requests and limits of your pods rather than the number of replicas. You can configure it to automatically recreate pods with new resource values based on observed usage patterns.
+
+Networking
+
+Kubernetes networking includes the ability to control traffic between pods using Network Policies.
+
+By default, all pods can communicate with all other pods. A network policy lets you restrict this. For example, you might create a policy that says only pods labeled as "frontend" can send traffic to pods labeled as "api" on port 8080. This implements a zero-trust network model where you explicitly define allowed connections.
+
+Key Concepts Checklist
+
+To prepare for interviews, make sure you can explain the following: What are pods, deployments, services, and ingress, and how do they relate to each other? What's the difference between resource requests and limits, and how do they affect scheduling and runtime behavior? What are the different deployment strategies - rolling updates, blue-green, and canary - and when would you use each? What's the difference between liveness and readiness probes, and why would you use both? How does the Horizontal Pod Autoscaler calculate the desired number of replicas? And when would you use each service type - ClusterIP, NodePort, LoadBalancer, or ExternalName?
+
+Practical Insights
+
+When it comes to resource sizing, start with requests based on load testing your application. A good rule of thumb is to set memory limits to about twice your memory request to provide a buffer before hitting the out-of-memory killer. For CPU, limits are optional because throttling isn't as catastrophic as being killed. Monitor your actual resource usage in production and adjust these values quarterly as your application evolves.
+
+Pod disruption budgets are crucial for maintaining availability during cluster operations. You define either a minimum number of pods that must be available, or a maximum number that can be unavailable at once. This prevents cluster operations like node draining or upgrades from taking down too many of your pods simultaneously.
+
+For production deployments, you should have a checklist. Make sure every deployment has resource requests and limits set. Include both liveness and readiness probes. Configure pod disruption budgets to maintain availability. Implement network policies for zero-trust networking. Apply pod security policies to prevent running as root and other security risks. And use proper labels for observability so you can filter and aggregate metrics and logs.
+
+Some common anti-patterns to avoid: Don't run containers as root - use a non-privileged user for security. Always set resource limits to prevent noisy neighbor problems where one pod starves others of resources. Include health checks to avoid zombie pods that appear running but aren't actually serving traffic. Don't store state in pods - use persistent volume claims or external storage services instead. And never hardcode configuration - always use ConfigMaps and Secrets.
+
+This concludes Chapter 28 on Container Orchestration with Kubernetes.

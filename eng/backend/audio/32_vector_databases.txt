@@ -1,0 +1,261 @@
+Chapter 32: Vector Databases
+
+Why Vector Search?
+
+Imagine you have a search bar that only returns exact keyword matches. A user searches for "affordable transportation" and your keyword matching system finds documents that contain the exact words "affordable" and "transportation." But it completely misses documents containing "cheap cars," "budget vehicles," or "inexpensive bikes." The result? You return only 3 results when 300 semantically relevant documents actually exist in your database.
+
+Traditional search fails for several critical reasons. First, there's the synonym problem - "cheap" and "affordable" mean the same thing, but a keyword search treats them as completely different. Second, there are related concepts - "vehicle," "car," and "bike" are all types of transportation, but keyword matching doesn't understand this relationship. Third, there's the issue of intent - when someone searches for "affordable transportation," they really mean budget vehicles, but keyword matching can't infer this meaning. Finally, there's the multi-language challenge - the same meaning can be expressed in different words across languages.
+
+Vector search solves this fundamental problem by representing meaning as numbers, enabling semantic similarity search rather than just keyword matching.
+
+Vector Embeddings: The Foundation
+
+The core problem is simple: computers can't understand "meaning." They need numbers. This is where vector embeddings come in.
+
+Here's how it works. Take the text "The cat sits on the mat." You pass this through an embedding model, such as BERT or OpenAI's embedding models. The model converts this text into a vector - a list of numbers - with dimensions like 768 values. So you get something like 0.23, negative 0.41, 0.67, and so on for 768 dimensions.
+
+Now take similar text like "A feline rests on the rug." When you pass this through the same embedding model, you get a vector that's close to the first one in this high-dimensional space. Maybe it's 0.25, negative 0.39, 0.65, and so on - notice how the numbers are very similar.
+
+But if you take completely unrelated text like "Quantum physics equations," the embedding model produces a vector that's far away in this space - perhaps negative 0.82, 0.15, negative 0.34, and so on.
+
+The key insight is that embeddings map semantically similar items close together in high-dimensional space.
+
+Here's what this looks like in code. You would import the sentence transformers library and load an embedding model like "all-MiniLM-L6-v2" which produces 384-dimensional vectors. Then you create a list of texts including "The cat sits on the mat," "A feline rests on the rug," and "Quantum physics equations." You encode all of them at once, and the result is a three-by-384 array where each row is the embedding for one sentence.
+
+Embedding dimensions are an important consideration. Small embeddings, like 384 dimensions, are fast but less precise. You'd use something like all-MiniLM-L6-v2 for this. Medium embeddings, around 768 dimensions, provide a balance between speed and accuracy. These are what you get from BERT and many sentence transformer models. Large embeddings, like 1536 dimensions from OpenAI's text-embedding-3-small, are more accurate but slower. And extra-large embeddings of 3072 dimensions or more, like OpenAI's text-embedding-3-large, provide the highest quality but come with the biggest computational cost.
+
+Similarity Metrics
+
+Once you have vectors, the next question is: how do you measure "closeness" in high-dimensional space? There are three main approaches.
+
+First, there's cosine similarity. This measures the angle between vectors and ignores their magnitude. Imagine two vectors as arrows pointing in different directions. The smaller the angle between them, the more similar they are. The mathematical formula computes the dot product of the two vectors, divides by the product of their norms, and gives you a result ranging from negative 1 to positive 1. A result of 1 means the vectors are identical in direction, 0 means they're orthogonal or perpendicular, and negative 1 means they point in opposite directions.
+
+Here's an example: if you have vector 1 as [1, 2, 3] and vector 2 as [2, 4, 6], they're pointing in the same direction but vector 2 has twice the magnitude. Cosine similarity would return 1.0 because only the direction matters. But if you have vector 3 as [negative 1, negative 2, negative 3], which points in the opposite direction, cosine similarity would return negative 1.
+
+Cosine similarity is ideal for text embeddings because the magnitude doesn't matter - only the meaning does. However, you wouldn't want to use cosine similarity when magnitude is significant, such as with image features.
+
+The second similarity metric is Euclidean distance, also known as L2 distance. This is simply the straight-line distance between two points in space. The formula is the square root of the sum of squared differences for each dimension. The result ranges from 0 to infinity, where 0 means the vectors are identical and larger values mean they're more different.
+
+For example, if you have vector 1 at the origin [0, 0, 0] and vector 2 at [3, 4, 0], the Euclidean distance is 5.0, just like the 3-4-5 triangle from geometry.
+
+Euclidean distance works well for image embeddings and spatial data, but it struggles in high dimensions due to something called the curse of dimensionality.
+
+The third metric is dot product similarity. This combines both angle and magnitude. It's simply the dot product of the two vectors, which ranges from negative infinity to positive infinity, with higher values indicating more similarity.
+
+Dot product is useful when vectors are pre-normalized to unit length. In that case, it's actually equivalent to cosine similarity but faster to compute. However, you shouldn't use dot product with unnormalized vectors because the magnitude can skew the results.
+
+To compare these three approaches: cosine similarity doesn't require normalized vectors and ignores magnitude, focusing only on direction - it's best for text search. Euclidean distance benefits from normalization and considers magnitude - it's best for images and spatial data. Dot product requires normalized vectors and considers magnitude when normalized - it's a fast alternative to cosine similarity.
+
+Approximate Nearest Neighbor Search
+
+Now we hit a major problem: exact search is O(n), meaning you have to compare the query to all vectors in your database.
+
+Imagine you have a dataset of 10 million vectors, each with 768 dimensions. To find the nearest neighbors to a query, you'd need to compare that query to all 10 million vectors. This takes approximately 30 seconds per query. That's completely unusable for production!
+
+The solution is Approximate Nearest Neighbor algorithms, or ANN for short. These algorithms trade a small amount of accuracy for massive speed improvements.
+
+Exact search is O(n) - you have to check everything. ANN algorithms are O(log n) - you only check a small subset.
+
+With 10 million vectors, exact search requires 10 million comparisons. ANN might only require around 1,000 comparisons while still achieving 99.5% recall. That's a 10,000 times speedup!
+
+HNSW: Hierarchical Navigable Small World
+
+So how do you quickly navigate millions of vectors? One of the best algorithms is HNSW, which stands for Hierarchical Navigable Small World.
+
+HNSW builds a multi-layer graph structure. Imagine a three-layer graph. Layer 2, the top layer, is sparse - it might only have two nodes, A and E, with a long connection between them. Layer 1, the middle layer, is more dense - it has nodes A, C, D, and E, with connections between them. Layer 0, the bottom layer, is very dense - it has all the nodes A through N, each connected to several neighbors.
+
+When you search, you start at the top layer and make big jumps to get close to your target. Then you move down to layer 1 and make medium-sized jumps to narrow down. Finally, you reach the bottom layer where you can make precise local searches to find the exact nearest neighbors.
+
+The search algorithm works like this: you start with an entry point at the top layer. Then for each layer from top to bottom, you perform a greedy search - repeatedly moving to the nearest neighbor until you can't improve anymore. Once you've worked down to the bottom layer, you return the k nearest neighbors you found.
+
+HNSW has several important parameters. M is the number of connections per node - higher values give better recall but slower index building. A typical value is 16. efConstruction is the number of candidates considered during index construction - higher values give better quality. A typical value is 200. efSearch is the number of candidates considered during search - higher values give better recall. A typical value is 100.
+
+The trade-offs are clear. With M equals 16 and efSearch equals 50, you might get 95% recall in 10 milliseconds. With M equals 32 and efSearch equals 200, you might get 99% recall but it takes 40 milliseconds.
+
+In terms of pros and cons: HNSW achieves 95 to 99% recall with proper tuning, but it's not exact. Search is fast at 10 to 50 milliseconds for 10 million vectors, but building the index is slow. It uses about twice the memory of the raw vectors, which is high. And while it supports insertions and deletions, these operations are slower than read-only indexes.
+
+Use HNSW when you need high recall, have memory available, and require sub-50-millisecond latency. Don't use it when you need exact results or when memory is constrained.
+
+IVF: Inverted File Index
+
+HNSW uses a lot of memory for billion-scale datasets. That's where IVF comes in - Inverted File Index.
+
+The idea is to cluster vectors into groups and only search the relevant clusters. Here's how it works:
+
+In the training phase, you cluster your vectors into N groups using k-means or a similar algorithm. Each cluster has a centroid - the center point of that cluster.
+
+When a query comes in, you find which centroid is nearest to the query, then you only search the vectors in that cluster. This means you might only search one-third or one-tenth of your data instead of everything!
+
+Here's what this looks like in code using the FAISS library. You'd set your dimension to 768 and choose a number of clusters, like 100. More clusters means faster search but lower recall. You create training data by sampling your vectors, then create a quantizer to find the nearest cluster. You build an IVF index, train it on the sample data to learn the cluster centroids, then add your full million-vector dataset. When you search, you set nprobe to control how many clusters to search - setting nprobe to 5 means you search the top 5 clusters out of 100.
+
+The parameters work like this: for 1 million vectors, use about 100 clusters. For 100 million vectors, use about 1,000 clusters. For 1 billion vectors, use about 10,000 clusters. The nprobe parameter controls the speed-accuracy trade-off: nprobe of 1 is fast but only gives about 70% recall, nprobe of 10 is medium speed with about 90% recall, and nprobe of 50 is slower but gives about 98% recall.
+
+The trade-offs: IVF uses low memory, just 1x the vector size, but it has lower recall than HNSW. It's very fast with low nprobe settings, but recall drops quickly. It can handle billions of vectors, but it requires a training phase. Updates are slow because you might need to rebuild clusters, so it's not friendly for real-time applications.
+
+Use IVF for billion-scale datasets, when memory is constrained, and when you can do batch updates. Don't use it for real-time updates or when you need very high recall above 95%.
+
+Product Quantization: Compression
+
+Here's a shocking memory requirement: 1 billion vectors times 768 dimensions times 4 bytes per float equals 3 terabytes of memory! That's impossible for most systems.
+
+Product Quantization, or PQ, solves this through compression. Here's how it works:
+
+Take an original vector with 768 dimensions, where each dimension is a 4-byte float. That's 3,072 bytes total. Now split this vector into 8 sub-vectors of 96 dimensions each. For each sub-vector, you find the nearest centroid from 256 learned centroids, and you store just the centroid ID - that's only 1 byte instead of 384 bytes for the full sub-vector. After compressing all 8 sub-vectors, you've reduced the storage from 3,072 bytes down to just 8 bytes. That's 96 times compression!
+
+In code using FAISS, you'd set the number of sub-quantizers to 8, meaning you split into 8 chunks, and bits per code to 8, giving you 256 centroids per chunk. You create a PQ index, train it on sample data, then add your vectors which are automatically compressed. The memory per vector is now just 8 bytes instead of 3,072, a compression ratio of 384x. When you search, the vectors are decompressed on-the-fly.
+
+The trade-offs: PQ achieves 96x compression, turning 768-dimension vectors into just 8 bytes, but you lose 5 to 10% recall. Search is actually faster because there's less data to load from memory, but there's decompression overhead. For top-k search results, the accuracy is still good, but the distance approximations aren't exact. You can handle billions of vectors on a single machine, but the compression is lossy.
+
+For the best of both worlds, you can combine IVF and PQ. This gives you fast cluster search from IVF plus compression from PQ. In FAISS, you'd create an IndexIVFPQ that combines both techniques.
+
+Use Product Quantization when memory is constrained and you can accept a 90 to 95% recall with some accuracy loss. Don't use it when you need exact distances or when high recall is critical.
+
+Metadata Filtering
+
+Here's a common problem: "Find similar documents, but only from the last 7 days."
+
+Without proper filtering, you'd do vector search to find the 1,000 nearest neighbors, then filter by date, and end up returning only 10 results because you discarded 990! That's incredibly wasteful.
+
+With proper filtering, you filter to documents from the last 7 days first, then do vector search within that filtered set, and return 10 results efficiently.
+
+The better approach is called pre-filtering. Using a database like Qdrant, you can pass a query filter that specifies the date range and category before the vector search happens. For example, you might filter for published_date greater than or equal to December 5th, 2025 and less than December 12th, and category equal to "technology." The database applies these filters first, then searches only the matching vectors.
+
+The fallback approach is post-filtering. When pre-filtering isn't supported, you'd search for a large number of results, like 1,000, then filter them in your application code to find the 10 that match your criteria. This is much less efficient.
+
+For index structures that support filtering, you have two options. Option 1 is partitioning - create a separate index per category. This gives fast filtering but complex management because you're maintaining multiple indexes. Option 2 is a compound index - a single index with metadata. This provides flexible filtering but can be slower when you have many filters.
+
+Hybrid Search: Vector Plus Keyword
+
+Vector search has a weakness: it can miss exact matches.
+
+For example, imagine a user searches for "iPhone 15 Pro Max." Vector search might find documents about "Latest Apple flagship phone" because that's semantically similar. But it could miss the exact product listing that has "iPhone 15 Pro Max" in the title. For product search, you really want that exact match!
+
+The solution is hybrid search: combine vector search for semantic matching with BM25 for keyword matching.
+
+Here's how it works: when a query comes in, you send it down two parallel paths. One path does vector search to find semantically similar documents. The other path does BM25 keyword search to find exact matches. Each path returns scored results. Vector search might return Document A with score 0.89, Document B with score 0.85, and Document C with score 0.82. BM25 search might return Document B with score 0.92, Document A with score 0.78, and Document D with score 0.71. Then you use a fusion algorithm like Reciprocal Rank Fusion to combine these rankings into a final result: Document B, Document A, Document C, Document D.
+
+Reciprocal Rank Fusion is a simple but effective algorithm. For each result list, you assign a score based on reciprocal rank: 1 divided by k plus rank plus 1, where k is a constant, typically 60. You sum these scores across both result lists for each document, then sort by the combined score.
+
+For example, with vector results of doc_a, doc_b, doc_c and keyword results of doc_b, doc_a, doc_d, doc_b would get scores from both lists and end up at the top.
+
+An alternative approach is weighted averaging. You might use alpha equals 0.7 to give 70% weight to vector scores and 30% weight to keyword scores. The alpha value should be tuned based on your use case.
+
+Use hybrid search for product search where you need exact SKU matching plus similar products, for document search where you want exact phrases plus semantic meaning, and for legal or medical search where you need both terminology precision and concept similarity.
+
+Indexing Strategies
+
+Let's compare three indexing strategies for different scale requirements.
+
+Strategy 1 is the flat index for exact search. This uses brute-force comparison and gives exact results. With FAISS, you'd create an IndexFlatL2 and add all your vectors. Every search compares the query to all vectors.
+
+Performance-wise, with 100,000 vectors, search time is about 50 milliseconds, recall is 100% because it's exact, and memory usage is 768 dimensions times 4 bytes times 100,000 vectors equals 307 megabytes.
+
+Use flat index when you have fewer than 100,000 vectors and exact results are required. Don't use it for more than 1 million vectors because it becomes too slow.
+
+Strategy 2 is HNSW for high recall. You'd create an IndexHNSWFlat with M equals 32 connections, set efConstruction to 200, and efSearch to 128.
+
+Performance with 10 million vectors: search time is about 20 milliseconds, recall is 98%, but memory usage is 768 dimensions times 4 bytes times 10 million vectors times 2, which equals 61 gigabytes.
+
+Use HNSW when you have fewer than 100 million vectors, need high recall above 95%, and have memory available. Don't use it when memory is constrained or you need to handle billions of vectors.
+
+Strategy 3 is IVF plus PQ for scale. You'd set dimension to 768, use 4,096 clusters, 64 sub-quantizers, and 8 bits per code. You create the index, train it on sample data, then add up to 1 billion vectors. At search time, you set nprobe to 16 to check 16 clusters.
+
+Performance with 1 billion vectors: search time is about 100 milliseconds, recall is 90%, and memory usage is just 64 bytes times 1 billion vectors equals 64 gigabytes. Compare this to 3 terabytes uncompressed!
+
+Use IVF plus PQ for billion-scale datasets, when memory is constrained, and when 90% or higher recall is acceptable. Don't use it for real-time updates or when exact results are required.
+
+To summarize the strategies: flat index handles up to 100,000 vectors with 50 millisecond search time, 100% recall, and 1x memory - best for exact search. HNSW handles up to 100 million vectors with 20 millisecond search time, 98% recall, and 2x memory - best for high recall. IVF handles up to 100 million vectors with 50 millisecond search time, 95% recall, and 1x memory - best for balanced use cases. And IVF plus PQ handles over 1 billion vectors with 100 millisecond search time, 90% recall, and just 0.05x memory - best for scale.
+
+Vector Database Comparison
+
+Let's compare five popular vector database options: Pinecone, Weaviate, Milvus, Qdrant, and pgvector.
+
+For deployment: Pinecone is cloud-only, Weaviate offers self-hosted or cloud, Milvus is self-hosted, Qdrant is self-hosted or cloud, and pgvector is a Postgres extension.
+
+For index types: Pinecone uses proprietary indexes, Weaviate uses HNSW, Milvus supports IVF and HNSW and more, Qdrant uses HNSW, and pgvector supports IVF and HNSW.
+
+All five can scale to billions of vectors, though pgvector is more suited to millions.
+
+For filtering: Pinecone, Weaviate, Milvus, and Qdrant all support pre-filtering. pgvector uses standard SQL WHERE clauses.
+
+For hybrid search: Weaviate, Milvus, and Qdrant have built-in support. Pinecone doesn't support it. pgvector requires manual implementation combining BM25 and vector search.
+
+For multi-tenancy: Pinecone uses namespaces, Weaviate uses tenants, Milvus uses partitions, Qdrant uses collections, and pgvector uses database schemas.
+
+All support real-time updates, though the mechanisms differ. pgvector uniquely offers full ACID transactions.
+
+For cost: Pinecone charges pay-per-use and can be expensive at scale. Weaviate, Milvus, and Qdrant are free to self-host. pgvector is free as a Postgres extension.
+
+Best use cases: Pinecone is best for managed services with no operations overhead. Weaviate is best for production environments needing flexibility. Milvus is best for large-scale research. Qdrant is best for performance and filtering. pgvector is best when you're already using Postgres.
+
+Let's look at some code examples.
+
+For Pinecone, you'd initialize with your API key and environment, get a reference to your index, then upsert vectors with metadata. To query with filtering, you'd pass the query vector, a filter for category equals "tech", and request top 10 results. The pros of Pinecone are zero operations overhead, auto-scaling, and good documentation. The cons are vendor lock-in, expensive pricing at scale, and no hybrid search.
+
+For Weaviate, you'd connect to the server, create a schema defining your class with properties and a vectorizer, then query using their GraphQL-style API with hybrid search. You can set alpha to 0.5 for balanced weighting between vector and keyword search, add WHERE filters, and limit results. The pros are built-in hybrid search, modular vectorizers, and a GraphQL API. The cons are complex setup and resource-intensive operation.
+
+For Milvus, you'd connect to the server, define a schema with fields including an ID, embedding vector, and metadata, create a collection, then create an index specifying IVF_FLAT with L2 metric and 1,024 clusters. To search, you'd specify the query vector, parameters like nprobe equals 16, a limit, and an expression for filtering. The pros are multiple index types, high performance, and active development. The cons are complex architecture and a steep learning curve.
+
+For Qdrant, you'd create a client connection, create a collection specifying vector size and distance metric like cosine, upsert points with vectors and payload, then search with filters. The pros are fast performance, excellent filtering, a simple API, and Rust-based performance. The cons are a smaller community and fewer integrations compared to others.
+
+For pgvector, you'd use SQL. First enable the vector extension, create a table with a vector column of dimension 768, create an index using ivfflat with 100 lists, then query using SQL with vector operations. The query would select content and calculate similarity using the cosine distance operator, filter by category, order by distance, and limit to 10 results. The pros are Postgres transactions, SQL familiarity, and no new infrastructure. The cons are limited scale to under 1 million vectors and slower performance than specialized databases.
+
+When should you use each database?
+
+Use Pinecone when you want to prototype quickly, don't have an ML operations team, and have budget available.
+
+Use Weaviate when you need hybrid search, want a modular architecture, and are deploying on Kubernetes.
+
+Use Milvus for billion-scale deployments, research use cases, or when performance is critical.
+
+Use Qdrant for production applications with complex filtering where you want simplicity.
+
+Use pgvector when you're already on Postgres, have fewer than 1 million vectors, and need ACID transactions.
+
+Key Concepts Checklist
+
+Let's review what you should be able to explain after studying this chapter.
+
+You should be able to explain what vector embeddings represent - they're semantic meaning encoded as numbers in high-dimensional space.
+
+You should be able to compare cosine versus euclidean versus dot product similarity, including when to use each.
+
+You should be able to describe the HNSW algorithm and its multi-layer graph structure for fast approximate search.
+
+You should be able to explain IVF clustering for approximate search, including how it partitions the vector space.
+
+You should understand Product Quantization for compression and its trade-offs.
+
+You should be able to design hybrid search combining vector and keyword search using Reciprocal Rank Fusion.
+
+You should be able to choose the appropriate index strategy - flat versus HNSW versus IVF plus PQ - based on dataset size and requirements.
+
+You should be able to compare vector databases for different use cases.
+
+And you should know when to use pgvector versus a dedicated vector database.
+
+Practical Insights
+
+Here are some battle-tested insights from production deployments.
+
+First, embedding model selection matters more than database choice. A better embedding model like OpenAI's embedding version 3 or Cohere version 3 can improve recall by 10 to 20%. Better index tuning typically only improves recall by 2 to 5%. Choose your model based on domain: use general-purpose models like sentence-transformers for broad applications, CodeBERT for code search, or LaBSE for multi-lingual search. Critically, always use the same model for both indexing and querying - mixing models breaks similarity comparisons.
+
+Second, index tuning is empirical, not theoretical. You should measure the recall versus latency trade-off using real queries. Load your test queries and ground truth from exact search using a flat index. Then test different values of efSearch, like 16, 32, 64, 128, and 256. For each setting, measure recall against ground truth and measure latency. Print the results and pick the point where recall stops improving significantly. There's no formula for this - you have to measure with your actual data.
+
+Third, hybrid search weight tuning requires experimentation. Start with alpha equals 0.5, meaning 50% vector and 50% keyword. Then A/B test different values. For product search, you might use alpha equals 0.3 to favor exact matches. For document search, you might use alpha equals 0.7 to favor semantics. For code search, alpha equals 0.5 balances both. Monitor metrics like click-through rate, time to find result, and user satisfaction scores to make data-driven decisions.
+
+Fourth, understand filtering performance. Pre-filtering is 10 to 100 times faster than post-filtering, but it requires database support. If your filters eliminate more than 90% of data, consider creating a separate index for that segment. For example, you might have one index for recent data from the last 7 days and another for archive data older than 7 days. If filters are highly selective, leaving less than 1% of data, consider separate indexes per category.
+
+Fifth, plan memory carefully. Uncompressed vectors require dimensions times 4 bytes times number of vectors. For example, 768 dimensions times 4 bytes times 10 million vectors equals 30 gigabytes. With Product Quantization at 96x compression, that same dataset would only need 8 bytes times 10 million vectors, which is 80 megabytes. The trade-off is 5 to 10% recall loss.
+
+Here's a rule of thumb: for fewer than 10 million vectors, use HNSW with 2x memory for high recall. For 10 to 100 million vectors, use IVF with 1x memory for good recall. For more than 100 million vectors, use IVF plus PQ with 0.05x memory for acceptable recall.
+
+Sixth, know when not to use vector databases. Don't use them for exact keyword matching only - use Elasticsearch instead. Don't use them for structured data queries - use Postgres or MySQL. Don't use them for time-series data - use InfluxDB. Don't use them for fewer than 10,000 documents - just use in-memory search with numpy. And don't use them for real-time updates every millisecond - vector databases have write latency.
+
+Do use vector databases for semantic search based on meaning rather than keywords. Use them for recommendation systems finding similar items. Use them for anomaly detection identifying outliers in vector space. And use them for multimodal search across text, images, and audio.
+
+Finally, the pgvector versus dedicated vector database decision. Use pgvector when you're already on Postgres, have fewer than 1 million vectors, need ACID transactions with vectors, want simple deployment with no new infrastructure, and your team is familiar with SQL.
+
+Use a dedicated vector database when you have more than 10 million vectors, require sub-20-millisecond latency, need complex filtering with pre-filtering support, want built-in hybrid search, or require horizontal scaling.
+
+This concludes Chapter 32 on Vector Databases.

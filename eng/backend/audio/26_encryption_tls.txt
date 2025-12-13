@@ -1,0 +1,341 @@
+Chapter 26: Encryption and TLS
+
+Why Encryption Matters
+
+Let me paint you a picture of what happens without encryption. Imagine it's 2:34 in the morning, and an attacker has just installed a network tap on a datacenter switch. Within one minute, by 2:35 AM, they're capturing everything flowing through that network. User passwords in plaintext. Credit card numbers in plaintext. Session tokens in plaintext. API keys in plaintext. Customer personally identifiable information, all in plaintext.
+
+Fast forward to 6:00 AM, and 2.3 million accounts are now compromised. By 8:00 AM that same morning, the company's stock has plummeted 35 percent. Two weeks later, an 847 million dollar class action lawsuit gets filed.
+
+This is why encryption matters. It prevents four critical types of attacks. First, man-in-the-middle attacks, where someone is eavesdropping on network traffic. Second, data breaches from stolen hard drives or database dumps. Third, insider threats from rogue employees or contractors who have physical access to systems. And fourth, compliance violations under regulations like GDPR, PCI-DSS, and HIPAA.
+
+Symmetric versus Asymmetric Encryption
+
+Let's start with symmetric encryption.
+
+Symmetric Encryption
+
+The problem symmetric encryption solves is this: you need to encrypt large amounts of data quickly. Asymmetric encryption, which we'll discuss in a moment, is just too slow for bulk data.
+
+Here's how symmetric encryption works. You use the same key for both encryption and decryption. Picture this process: you start with plaintext, let's say the word "Secret". You encrypt it using a symmetric algorithm like AES, Advanced Encryption Standard. This produces ciphertext that looks like random characters, something like "a7d9f3e1". You send this ciphertext over the network or store it on disk. When you need to decrypt it, you use that exact same key with the AES algorithm, and you get your original plaintext "Secret" back.
+
+Let me walk you through a practical implementation using AES-256-GCM, which stands for Advanced Encryption Standard with 256-bit keys in Galois Counter Mode. This mode provides both encryption and authentication, which is important because it protects against tampering.
+
+Here's what the encryption function does. You create an AES-GCM cipher object with your key. The key must be exactly 32 bytes for AES-256. Then you generate a nonce, which is a unique initialization vector. For GCM mode, you need 12 bytes, or 96 bits. This nonce must be unique for every encryption operation. The GCM mode provides both encryption and authentication, meaning it not only scrambles your data but also ensures nobody has modified it. The function returns both the ciphertext and the nonce, which you'll need for decryption.
+
+For decryption, you create the same AES-GCM cipher with your key, then use the decrypt method with the nonce and ciphertext to recover your original plaintext.
+
+In practice, you'd generate a key using the AESGCM generate_key method with a bit length of 256, giving you 32 bytes. Then you can encrypt a message like "User credit card: 4532-1234-5678-9010". When you decrypt it, you get back exactly the same message.
+
+Now let's talk about the trade-offs of symmetric encryption. On the pros side, it's very fast. Modern processors have hardware acceleration for AES, giving you throughput of 1 to 10 gigabytes per second. On the cons side, you face the key distribution problem: how do you share the key securely in the first place?
+
+When should you use symmetric encryption? It's perfect for encrypting data at rest and encrypting large payloads after you've already established a secure key exchange. When should you NOT use it? For the initial communication setup. The problem is: how do both sides get the same key without sending it in plaintext where an attacker could intercept it?
+
+Asymmetric Encryption
+
+This brings us to asymmetric encryption, which solves exactly this problem.
+
+The problem is: how do you establish a shared secret over an untrusted network? If you send the symmetric key in plaintext, an attacker can intercept it and read all your encrypted messages.
+
+Asymmetric encryption uses different keys: a public key for encryption and a private key for decryption. Here's how it works. Let's say Alice and Bob want to communicate. Bob has a private key that he keeps secret and a public key that he can share with anyone. When Alice wants to send Bob a secret message, she takes Bob's public key and uses it to encrypt her plaintext message, let's say the word "Secret". This produces ciphertext like "x9f2a1b5". She sends this ciphertext over the network to Bob. Only Bob, with his private key, can decrypt this ciphertext and recover the original plaintext "Secret".
+
+Let's look at an implementation using RSA, which stands for Rivest, Shamir, Adleman, named after the three cryptographers who invented it.
+
+First, you generate a key pair. This is something you do once and then store the private key very securely. You use the RSA generate_private_key function with a public exponent of 65537, which is the standard value, and a key size of at least 2048 bits. For high security applications, you'd use 4096 bits. From the private key, you can derive the public key.
+
+To encrypt with the public key, you use the OAEP padding scheme, which stands for Optimal Asymmetric Encryption Padding. This padding is crucial for security. You combine it with SHA-256 for the hash function. This produces your ciphertext.
+
+To decrypt, you use the private key with the same OAEP padding scheme and hash function to recover the plaintext.
+
+In practice, Bob would generate his key pair and share his public key with Alice. Alice encrypts her message "Shared secret key for AES" using Bob's public key. Only Bob can decrypt it with his private key, and he gets back the exact same message.
+
+Now for the trade-offs. The big downside is speed: asymmetric encryption is about 1000 times slower than symmetric. The advantage is that the public key can be shared openly. However, you do need something called PKI, Public Key Infrastructure, to verify that the public key actually belongs to who you think it does.
+
+Asymmetric encryption is not suitable for bulk data because of the message size limitation. With RSA-2048, you can only encrypt about 190 bytes at a time, after accounting for padding.
+
+When should you use asymmetric encryption? For establishing an initial secure channel, for digital signatures, and for small pieces of sensitive data. When should you NOT use it? For encrypting large files. Instead, you use what's called a hybrid approach.
+
+Hybrid Encryption - The Real-World Pattern
+
+This is how TLS, Transport Layer Security, actually works in practice.
+
+Step one: Use asymmetric encryption to exchange a symmetric key. Step two: Use symmetric encryption for all subsequent data.
+
+Here's the flow. The client generates a random AES key. The client encrypts this AES key using the server's public key. The client sends the encrypted AES key to the server. The server decrypts it using its private key. Now both client and server have the same AES key, and they never sent it in plaintext. All future data is encrypted with this fast AES symmetric key.
+
+This gives you the best of both worlds: the security of asymmetric encryption for the key exchange, and the speed of symmetric encryption for actual data transfer.
+
+TLS Handshake Deep Dive
+
+Now let's dive into how TLS handshakes actually work.
+
+TLS 1.2 Handshake
+
+The TLS 1.2 handshake involves 6 steps and requires 2 round trips between client and server before any application data can be transferred.
+
+Step 1: The client sends a ClientHello message. This includes the TLS version it supports, like 1.2. It includes a list of cipher suites it can use, like TLS_RSA_WITH_AES_128_GCM. And it includes 32 random bytes that will be used later.
+
+Step 2: The server responds with ServerHello. It chooses one of the cipher suites, let's say AES_128_GCM. It sends its own 32 random bytes. It sends its certificate, which contains its public key. And it sends a ServerHelloDone message to indicate it's finished.
+
+Step 3: The client sends ClientKeyExchange. This contains something called the pre-master secret, which is encrypted with the server's public key from the certificate.
+
+At this point, both sides compute the master secret using a pseudorandom function, or PRF. They combine the pre-master secret with both the client random and server random values.
+
+Step 4: The client sends ChangeCipherSpec and Finished messages. These are encrypted with the newly derived keys to prove everything worked.
+
+Step 5: The server sends its own ChangeCipherSpec and Finished messages, also encrypted, as confirmation.
+
+Step 6: Now both sides can exchange application data, all encrypted.
+
+The total time is 2 round trips before you can send any actual data.
+
+Let me explain the key derivation process in TLS 1.2. You start with the pre-master secret that was exchanged. You use a pseudorandom function based on HMAC-SHA256 to derive the master secret, which is 48 bytes long. The inputs are the pre-master secret, the label "master secret", and the concatenation of client random and server random.
+
+Then you derive the actual encryption keys from this master secret. You use the PRF again with the master secret, the label "key expansion", and the server random plus client random. This generates enough key material, 104 bytes, to create separate keys for client-to-server and server-to-client communication. These get split into client write MAC key, server write MAC key, client write encryption key, server write encryption key, client write initialization vector, and server write initialization vector.
+
+TLS 1.3 Handshake
+
+TLS 1.3 improved this process significantly.
+
+The TLS 1.3 handshake only requires 1 round trip, making it 50 percent faster than TLS 1.2.
+
+Step 1: The client sends ClientHello, but this time it includes more information upfront. It lists supported groups like x25519 and secp256r1, which are elliptic curve parameters. And critically, it includes a key share, a pre-generated Diffie-Hellman key, speculatively guessing which group the server will choose.
+
+Step 2: The server responds with ServerHello, including its own Diffie-Hellman key share. At this point, both sides can immediately compute the shared secret and derive encryption keys. So the server also sends its certificate and a Finished message, and these are already encrypted using the derived handshake keys.
+
+Step 3: The client sends its Finished message, also encrypted.
+
+Step 4: Application data can now flow, fully encrypted.
+
+Total time: just 1 round trip, half the latency of TLS 1.2. Also, notice that the certificate is encrypted in TLS 1.3, providing better privacy.
+
+TLS 1.3 made several major improvements beyond just speed.
+
+First, it provides forward secrecy by default using ephemeral Diffie-Hellman. This means that even if the server's private key is compromised in the future, past recorded sessions remain secure because each session used temporary keys that were discarded.
+
+Second, TLS 1.3 simplified cipher suites dramatically. TLS 1.2 had 37 different cipher suites, many of which were insecure or outdated. TLS 1.3 has only 5 cipher suites, and all of them are secure. The three main ones are TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384, and TLS_CHACHA20_POLY1305_SHA256.
+
+Third, TLS 1.3 removed many insecure features. No more RSA key exchange because it doesn't provide forward secrecy. No more CBC cipher mode because it's vulnerable to padding oracle attacks. No more SHA-1 or MD5 hash functions because they're cryptographically broken. And no more compression because of an attack called CRIME.
+
+Certificate Chains and PKI
+
+Now we need to address a critical question: how do you know the server's public key is legitimate?
+
+The Trust Problem
+
+Without certificates, here's what could happen. An attacker intercepts your connection to bank.com. The attacker sends you their own public key, pretending to be the bank. You encrypt your password with the attacker's public key, thinking you're talking to the bank. The attacker decrypts it, reads your password, then re-encrypts it with the real bank's public key and forwards it along. You never know you were compromised. This is a classic man-in-the-middle attack.
+
+This is where certificate chains come in.
+
+Certificate Chain Verification
+
+Think of it as a chain of trust with three levels.
+
+At the top, you have the Root Certificate Authority, or Root CA. Let's say it's GlobalSign Root CA. This certificate is self-signed, meaning it vouches for itself. Everyone trusts this because it comes pre-installed in your operating system or browser. These root certificates typically have very long validity periods, like 20 years. The root CA has a public key and signs its own certificate.
+
+The root CA signs an Intermediate Certificate Authority. For example, GlobalSign Domain Validation CA. This intermediate certificate is signed by the root CA and is valid for a shorter period, typically 5 years. The intermediate has its own public key and a signature from the root CA.
+
+The intermediate CA then signs the actual Server Certificate. For example, api.example.com. This server certificate is signed by the intermediate CA. Modern certificates from providers like Let's Encrypt are only valid for 90 days, forcing regular rotation. This certificate contains the server's public key and a signature from the intermediate CA.
+
+When your browser connects to a server, it performs a verification algorithm with six steps.
+
+First, verify the server certificate is signed by the intermediate. You extract the intermediate's public key and use it to verify the signature on the server certificate.
+
+Second, verify the intermediate certificate is signed by the root. Extract the root's public key and verify the signature on the intermediate certificate.
+
+Third, verify the root certificate is in your trust store. Your operating system maintains a list of trusted root CAs.
+
+Fourth, check the validity dates on all certificates. Make sure the current time falls between the "not before" and "not after" dates.
+
+Fifth, check that the domain name matches. The server certificate should list api.example.com as one of its valid hostnames.
+
+Sixth, check the revocation status. The certificate might have been revoked before its expiration date, either through OCSP (Online Certificate Status Protocol) or CRL (Certificate Revocation List).
+
+Only if all six checks pass does the browser trust the server's public key.
+
+Certificate Pinning
+
+But even this system has weaknesses. What if a root CA is compromised? What if a government pressures a CA to issue a fraudulent certificate?
+
+Certificate pinning solves this by hardcoding the expected certificate or public key hash directly in your application. For example, you store the SHA-256 hash of the expected public key. When you connect to the server, you extract the server's public key, hash it with SHA-256, and compare it to your pinned value. If they don't match, you reject the connection, even if the certificate is otherwise valid.
+
+The trade-off is that certificate pinning is more secure, but it requires updating your client application every time you rotate your certificate.
+
+Mutual TLS, or mTLS
+
+Standard TLS only goes one way: the server proves its identity to the client. But what if you want both sides to prove their identity? This is called Mutual TLS, or mTLS.
+
+The Problem and Use Case
+
+This is particularly important for service-to-service communication in microservices architectures. You want to ensure that only authorized services can talk to each other.
+
+mTLS Handshake
+
+The mTLS handshake is similar to standard TLS but with additional steps.
+
+The client sends ClientHello. The server responds with ServerHello, its certificate, and critically, a CertificateRequest message, asking the client to also prove its identity. The client sends its own certificate and a CertificateVerify message, which is a proof that it possesses the private key corresponding to its certificate. The client sends Finished. The server verifies the client's certificate using the same chain verification process. If valid, the server sends its Finished message. Now encrypted application data can flow, with both sides authenticated.
+
+In code, here's how you'd set this up. On the server side, you create an SSL context, load your server's certificate and private key, then set verify_mode to CERT_REQUIRED and load the CA certificate that should have signed the client certificates. On the client side, you make requests with both a client certificate and client private key, and you verify the server's certificate using the server CA certificate.
+
+In production, especially in microservices with hundreds of services, managing all these certificates manually is impractical. This is where service meshes come in. Tools like Istio can automatically inject mTLS between services. You define a policy that requires strict mTLS mode for all traffic. The service mesh handles certificate provisioning, rotation (typically every 24 hours), and policy enforcement automatically.
+
+Let's compare standard TLS versus mTLS. Standard TLS only authenticates the server, is simple to set up, and is used for client-server communication like web browsers. You only need to rotate the server certificate, and performance overhead is low. mTLS authenticates both sides, requires complex certificate management for potentially thousands of services, is used for service-to-service communication, requires rotating both client and server certificates, and has slightly higher performance overhead because you're doing two certificate verifications instead of one.
+
+Encryption at Rest
+
+So far we've talked about encryption in transit, protecting data as it moves over the network. But what about data sitting in a database or on disk?
+
+Database Encryption
+
+The problem is simple: what happens if someone steals your hard drives, takes a snapshot of your cloud storage, or a database administrator goes rogue?
+
+Transparent Data Encryption, or TDE
+
+Here's how Transparent Data Encryption works. Your application sends a SQL query like "SELECT * FROM users WHERE id = 123". This goes to the database engine, which executes the query. At this point, the data is in plaintext in memory. But when the database writes to disk, it goes through an encryption layer. The actual disk storage contains encrypted pages that look like random bytes. The encryption key is stored separately, typically in a Hardware Security Module, a Key Management Service like AWS KMS, or at minimum a separate key file.
+
+For PostgreSQL, you can enable column-level encryption. First, you create the pgcrypto extension. Then you define your table with a column designated to store encrypted data as a BYTEA type. When you insert data, you use the pgp_sym_encrypt function to encrypt the value with a key. When you query, you use pgp_sym_decrypt to decrypt it.
+
+For MongoDB, you can enable encryption at rest in the configuration file. Set enableEncryption to true and specify an encryption key file. MongoDB can also rotate encryption keys using an admin command.
+
+Application-Level Encryption
+
+Sometimes you want to encrypt data before it even reaches the database. This is the zero-trust approach: you don't trust the database administrators or even the database server itself.
+
+Here's how you'd implement this. You create an EncryptedField class that uses the Fernet encryption scheme, which is a secure symmetric encryption implementation. Your encrypt method takes plaintext, encrypts it, and returns base64-encoded ciphertext. Your decrypt method reverses this.
+
+In your ORM model, let's say for a User table, you store the encrypted SSN in a column. You use a property decorator to transparently decrypt when the attribute is accessed, and a setter to encrypt when it's assigned. From the application perspective, you just set user.ssn to the plaintext value, and it gets automatically encrypted before saving to the database. The database only ever sees the encrypted ciphertext. Even a database administrator can't read the SSN without the encryption key, which lives in your application.
+
+Key Management and Rotation
+
+Now we have a new problem. You've encrypted everything. Great! But how do you store the encryption keys securely?
+
+The Key Management Problem
+
+Here are some bad solutions. Don't hard-code keys in source code; they'll be exposed in git history. Don't use environment variables; they're visible in process listings and logs. Don't store keys in config files on the same disk as your database; they'll be stolen together in a breach.
+
+This creates a paradox: encryption keys themselves need to be encrypted. But what encrypts those keys?
+
+Key Hierarchy and Envelope Encryption
+
+The solution is a key hierarchy with envelope encryption.
+
+At the top, you have a Master Key, also called the Root Key. This is stored in a Hardware Security Module or Key Management Service. This key never leaves the secure boundary of the HSM or KMS. It's rotated rarely, maybe every few years.
+
+The master key encrypts Data Encryption Keys, or DEKs. You generate a separate DEK for each table, file, or tenant. These DEKs are stored in encrypted form in your database or on disk. DEKs are rotated frequently, maybe every few days or months.
+
+The DEKs encrypt your actual data: user records, files, and so on.
+
+Here's how this works in practice with AWS KMS. Your encrypt_data method first generates a random DEK using Fernet. It uses this DEK to encrypt your plaintext data. Then it encrypts the DEK itself using the KMS master key. The method returns both the encrypted data and the encrypted DEK. You store both of these in your database.
+
+To decrypt, you first decrypt the DEK using KMS to get the plaintext DEK. Then you use that DEK to decrypt your data.
+
+This approach means your KMS master key only encrypts small DEKs, which is fast. The bulk data encryption uses fast symmetric encryption. And if a DEK is compromised, only data encrypted with that specific DEK is at risk.
+
+Key Rotation Strategies
+
+Why rotate keys? First, to limit the blast radius if a key is compromised. Second, for compliance requirements like PCI-DSS which mandates annual rotation. Third, to reduce the risk of successful cryptanalysis over time.
+
+Strategy 1 is to re-encrypt all data. You query all records, decrypt each with the old key, re-encrypt with the new key, and update the database. The downside is this is expensive, may require downtime, and needs read-write locks to prevent inconsistencies during rotation.
+
+Strategy 2 is versioned keys with gradual rotation. You store the key version alongside each encrypted value. When encrypting new data, always use the current version. When decrypting, check the version prefix and use the corresponding key. Over time, as you read and write data, you gradually re-encrypt old data with the new key. This approach requires no downtime and distributes the re-encryption work over time.
+
+The implementation works like this. You maintain a dictionary mapping version numbers to Fernet objects. When encrypting, you prepend a version byte to the ciphertext and use the current key version. When decrypting, you read the version byte and use the corresponding key. You can check if re-encryption is needed by comparing the version to your current version. When you read a record with an old key version, you decrypt it, immediately re-encrypt it with the new version, and save it back.
+
+Hardware Security Modules, or HSMs
+
+We've mentioned HSMs several times. Let's talk about what they actually are.
+
+The Problem
+
+Software-based key storage is vulnerable. Memory dumps can expose keys. Operating system vulnerabilities can leak keys. Privileged users with root access can read key files.
+
+What is an HSM?
+
+A Hardware Security Module is a tamper-resistant hardware chip. The keys never leave the device; they're generated inside and stay inside. All cryptographic operations happen in hardware. If someone tries to physically tamper with the device, it will destroy itself and the keys inside.
+
+The HSM exposes an API for operations like encrypt plaintext to get ciphertext, decrypt ciphertext to get plaintext, sign data to get a signature, and generate a new key which returns a key identifier but not the actual key.
+
+Here's how you'd use AWS CloudHSM. You connect to the CloudHSM service. You generate an AES key inside the HSM; the key never leaves the device. When you want to encrypt data, you call the encrypt method with the key handle and your plaintext. The encryption happens inside the HSM. To decrypt, you call decrypt with the key handle and ciphertext. Again, the decryption happens inside the HSM. Your application never has access to the actual key material; all cryptographic operations are performed inside the tamper-resistant hardware.
+
+Let's compare KMS versus HSM. A Key Management Service like AWS KMS uses shared multi-tenant hardware, has higher latency because you're making API calls over the network, costs about 1 dollar per key per month, and meets most compliance requirements. It's suitable for general purpose applications.
+
+A Hardware Security Module provides dedicated hardware or single-tenant isolation, has lower latency for dedicated deployments, costs 1,000 to 5,000 dollars per month, and meets the highest security standards like FIPS 140-2 Level 3 and PCI-DSS requirements for payment processing. Use HSMs for payment processing, certificate authorities, and cryptographic key signing operations. Don't use HSMs for general web applications; KMS is sufficient and much cheaper.
+
+Comparison: TLS 1.2 versus TLS 1.3
+
+Let's summarize the differences between TLS 1.2 and TLS 1.3.
+
+Handshake latency: TLS 1.2 requires 2 round trips, while TLS 1.3 only needs 1 round trip, and 0-RTT is even possible in some cases.
+
+Cipher suites: TLS 1.2 has 37 options, many of which are insecure. TLS 1.3 has only 5 options, all of which are secure.
+
+Forward secrecy: In TLS 1.2, forward secrecy is optional and only available with DHE or ECDHE cipher suites. In TLS 1.3, it's mandatory for all cipher suites.
+
+Certificate encryption: TLS 1.2 sends certificates in plaintext during the handshake. TLS 1.3 encrypts certificates after the ServerHello.
+
+Session resumption: TLS 1.2 uses session IDs or session tickets. TLS 1.3 uses pre-shared keys, or PSK.
+
+RSA key exchange: TLS 1.2 supports it, but TLS 1.3 removed it because it doesn't provide forward secrecy.
+
+CBC cipher mode: TLS 1.2 supports it, but TLS 1.3 removed it because of padding oracle attacks.
+
+Performance: TLS 1.3 is 20 to 30 percent faster than TLS 1.2.
+
+Browser support: TLS 1.2 has universal support. TLS 1.3 has over 95 percent support; notably, Internet Explorer 11 doesn't support it.
+
+Key Concepts Checklist
+
+Here's what you should be able to do after studying this chapter.
+
+Explain symmetric versus asymmetric encryption and when to use each. Describe the differences between TLS 1.2 and TLS 1.3 handshakes. Verify certificate chains from the leaf certificate up to the root CA. Implement mutual TLS for service-to-service authentication. Design an encryption at rest strategy, choosing between transparent data encryption and application-level encryption. Implement envelope encryption with a proper key hierarchy. Plan a key rotation strategy, deciding between full re-encryption and versioned keys. Know when to use a Hardware Security Module versus a Key Management Service.
+
+Practical Insights
+
+Let me share some hard-won wisdom from operating encrypted systems at scale.
+
+TLS Configuration Mistakes
+
+Here are some common nginx configuration mistakes. Bad configuration: allowing insecure TLS 1.0 and TLS 1.1 protocols. Good configuration: only enable TLS version 1.2 and TLS version 1.3.
+
+Bad configuration: using vague cipher suite specifications like "HIGH" with exclusions. Good configuration: explicitly specify strong cipher suites like ECDHE-ECDSA-AES128-GCM-SHA256 and ECDHE-RSA-AES128-GCM-SHA256, and prefer server cipher suite ordering.
+
+Always add the Strict-Transport-Security header with a max-age of 31,536,000 seconds, which is one year, and include subdomains.
+
+Certificate Lifecycle at Scale
+
+Automate certificate renewal using tools like Let's Encrypt with certbot, or AWS Certificate Manager for cloud environments. Monitor certificate expiration and alert at least 30 days before they expire. Use short-lived certificates, typically 90 days, to limit the window of compromise if a key is stolen. Centralize certificate management using tools like HashiCorp Vault or cert-manager in Kubernetes.
+
+Performance Impact of Encryption
+
+Here's a benchmark for processing 1 gigabyte of data. With no encryption, it takes 100 milliseconds. With AES-256-GCM symmetric encryption, it takes 150 milliseconds, a 50 percent overhead. With RSA-2048 asymmetric encryption, it would take 25,000 milliseconds, 250 times slower! The takeaway: use symmetric encryption for data and only use asymmetric encryption for key exchange. Modern hardware AES acceleration reduces the overhead to less than 10 percent.
+
+Key Rotation Frequency
+
+For master keys stored in HSMs or KMS, rotate every 1 to 2 years, or immediately upon compromise. For data encryption keys, rotate every 30 to 90 days. For TLS certificates, the standard is 90 days, which is what Let's Encrypt uses. For API keys and tokens, rotate on user request or immediately upon compromise.
+
+Compliance requirements vary. PCI-DSS requires annual key rotation. HIPAA requires "reasonable and appropriate" rotation, often interpreted as annual. SOC 2 requires documenting and following a rotation policy.
+
+mTLS at Scale with Service Mesh
+
+Service meshes provide several benefits for mTLS. They automatically provision certificates, eliminating manual certificate distribution. They use short-lived certificates with 1 to 24 hour time-to-live, which auto-renew. They enable zero-trust networking where every connection is authenticated. They provide centralized policy management through tools like Istio, Linkerd, or Consul Connect. And they offer observability, letting you see which services communicate and detect anomalies.
+
+Common Pitfalls
+
+Here are some mistakes to avoid. Don't use ECB mode for AES encryption. In ECB mode, patterns in the plaintext remain visible in the ciphertext. Do use GCM mode, which provides authenticated encryption.
+
+Don't reuse the initialization vector or nonce for the same key. Using the same nonce like "00000000" for every encryption completely breaks the security. Do generate a random nonce for each encryption operation.
+
+Don't store the encryption key alongside the encrypted data in the same database record. Do use envelope encryption with the DEK encrypted by KMS and stored separately from your master key.
+
+When to Use Application-Level Encryption
+
+Use application-level encryption when you have a zero-trust architecture and don't even trust database administrators. Use it for multi-tenancy when you want per-tenant encryption keys. Use it for compliance when regulations require data to be encrypted before leaving the application boundary. And use it for selective encryption when only specific fields need encryption, not the entire database.
+
+Cost Considerations
+
+For AWS KMS, you pay 1 dollar per key per month, plus 3 cents per 10,000 requests. At 100 requests per second, this costs about 8 dollars per month.
+
+For AWS CloudHSM, you pay 1.60 dollars per hour, which is 1,168 dollars per month minimum. Use this for payment processing or certificate authorities.
+
+Here's a rule of thumb. For less than 1,000 encryptions per second, use KMS. For more than 1,000 encryptions per second with compliance requirements, use CloudHSM. For more than 10,000 encryptions per second, use application-level encryption with KMS envelope encryption to avoid hitting KMS rate limits.
+
+That concludes Chapter 26 on Encryption and TLS.

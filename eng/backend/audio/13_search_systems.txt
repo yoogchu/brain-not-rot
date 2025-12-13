@@ -1,0 +1,307 @@
+Chapter 13: Search Systems and Elasticsearch
+
+Why Search Systems Matter
+
+Imagine your e-commerce platform stores 50 million products in PostgreSQL. A user searches for "wireless bluetooth headphones" using a standard SQL query with a LIKE operator. The query takes 45 seconds to complete. By that time, the user has already left your site in frustration. Meanwhile, Amazon returns 10,000 relevant results in just 200 milliseconds.
+
+But the problem isn't just about speed. It's also about relevance. Your basic SQL query has fundamental limitations. It misses products like "Bluetooth wireless earbuds" because the words appear in a different order. It returns irrelevant results like "headphones stand wireless charging" because the product description contains all the search words, even though it's the wrong product. It can't rank results by relevance, showing the most important matches first. And it doesn't handle common typos like "wirless" or "headphons."
+
+Search systems solve three hard problems simultaneously: speed, enabling sub-second searches on billions of documents; relevance, finding what users actually mean rather than just matching what they literally type; and scale, providing distributed full-text search across massive datasets.
+
+The Inverted Index
+
+The fundamental data structure behind all search engines is called the inverted index. To understand why this is revolutionary, let's first look at the problem with traditional forward indexes.
+
+The Problem with Forward Indexes
+
+A traditional database stores documents in a forward index and scans for matches. Imagine you have three documents. Document 1 contains "The quick brown fox jumps over lazy dog." Document 2 contains "Quick brown dogs are lazy." Document 3 contains "The fox is quick and brown." When you query for "quick brown," the database must scan ALL documents and check each one for a match. This is an O(n) operation where n equals the total number of documents.
+
+How Inverted Indexes Work
+
+An inverted index flips this relationship completely. Instead of mapping documents to the words they contain, it maps terms to the documents containing them. This is like an index at the back of a book.
+
+In our three-document example, the inverted index would create a table. The term "brown" appears in documents 1, 2, and 3. The term "dog" appears in documents 1 and 2. The term "fox" appears in documents 1 and 3. The term "jumps" appears only in document 1. The term "lazy" appears in documents 1 and 2. The term "over" appears only in document 1. The term "quick" appears in all three documents. The term "the" appears in documents 1 and 3.
+
+Now when you query for "quick brown," the search engine looks up "quick" and finds documents 1, 2, and 3. It looks up "brown" and finds documents 1, 2, and 3. It intersects these two lists and returns documents 1, 2, and 3. This is an O(k) operation where k equals the number of matching documents, which is typically much smaller than the total document count.
+
+Let me walk you through a basic implementation. You create a class called InvertedIndex. It maintains a dictionary mapping terms to sets of document IDs, stores the actual document text in another dictionary, and keeps a counter for document IDs. When adding a document, you assign it a unique ID, store the text, tokenize it into individual terms, and add the document ID to the set for each term. For searching, you tokenize the query, look up the document IDs for each term, and intersect them to find documents containing all terms.
+
+Posting List Enhancements
+
+Production search engines store much more than just document IDs in what's called a posting list. For example, when indexing the term "elasticsearch," each posting list entry might include the document ID, such as 42; the term frequency, indicating it appears 5 times in that document; the exact positions where it appears, like character positions 12, 45, 89, 120, and 156; which field contains the term, such as the "body" field; and custom metadata called payloads.
+
+This rich information enables three important features. First, TF-IDF scoring, where term frequency matters for determining relevance. Second, phrase queries, where searching for "quick brown" requires the words to appear at adjacent positions. Third, field boosting, where matches in the title can be weighted higher than matches in the body.
+
+Text Analysis Pipeline
+
+Raw text must be processed before it can be indexed effectively. Let's walk through the stages of text analysis using the example phrase "The Quick Brown Fox's jumping!"
+
+First, character filters run. These strip HTML tags, convert accented characters to their base form, and normalize unicode. In our example, the text remains "The Quick Brown Fox's jumping!" because there's nothing to filter.
+
+Next, the tokenizer splits the text into individual tokens based on whitespace and punctuation. This produces the tokens: "The", "Quick", "Brown", "Fox's", and "jumping".
+
+Then token filters are applied in sequence. Lowercasing converts everything to lowercase: "the", "quick", "brown", "fox's", "jumping". A possessive filter removes the apostrophe-s: "the", "quick", "brown", "fox", "jumping". Stop word removal eliminates common words like "the": "quick", "brown", "fox", "jumping". Finally, stemming reduces words to their root form: "quick", "brown", "fox", "jump".
+
+The final indexed terms are: quick, brown, fox, and jump.
+
+Common Analyzers
+
+Elasticsearch uses analyzer configurations to define this pipeline. For example, an English analyzer might use a standard tokenizer, then apply filters in sequence: lowercase, English possessive stemmer, English stop words, and English stemmer. Each filter can be customized with specific settings, like which stop words to use or which language's stemming rules to apply.
+
+Analysis Trade-offs
+
+Every analysis technique involves trade-offs. Stemming allows "running" to match "run," which is helpful, but it might cause "universe" to match "university," which could be unwanted. Removing stop words creates a smaller index and faster searches, but it means a famous phrase like "To be or not to be" becomes empty after analysis. Lowercasing enables case-insensitive search, but it creates ambiguity where "US" matches "us." Synonym expansion allows "car" to match "automobile," but it increases index size and creates a maintenance burden.
+
+When should you use aggressive analysis? It's best for general search applications like blog posts, news articles, and product descriptions where finding conceptually related content matters. When should you use minimal analysis? It's better for exact matching scenarios like product SKUs, identifiers, and log search where precision is critical.
+
+Relevance Scoring
+
+Not all matches are created equal. Scoring algorithms rank results by relevance to help users find what they're looking for.
+
+TF-IDF
+
+TF-IDF combines two concepts: term frequency and inverse document frequency.
+
+Term frequency measures how often a term appears in a specific document. For example, if a document contains "Search search search systems," the term "search" appears 3 times out of 4 total words, giving it a TF of 0.75. The term "systems" appears once out of 4 words, giving it a TF of 0.25.
+
+Inverse document frequency measures how rare a term is across all documents. If you have 1 million total documents, and 900,000 of them contain the word "the," the IDF for "the" is the logarithm of 1 million divided by 900,000, which equals 0.05. This is a low weight because "the" is so common. If only 5,000 documents contain "elasticsearch," the IDF is the logarithm of 1 million divided by 5,000, which equals 2.3. This is a high weight because "elasticsearch" is rare.
+
+The TF-IDF score is simply term frequency multiplied by inverse document frequency. This gives higher scores to terms that appear frequently in a document but rarely across the whole corpus.
+
+Here's how you calculate it. For term frequency, you count how many times the term appears and divide by the total number of terms in the document. For inverse document frequency, you count how many documents contain the term, then calculate the logarithm of total documents divided by documents containing the term. The TF-IDF score is the product of these two values.
+
+BM25: Best Match 25
+
+BM25 is the industry standard ranking algorithm, used by Elasticsearch and Apache Lucene. It improves on TF-IDF in important ways.
+
+The BM25 formula calculates a score for each term in a document using the inverse document frequency, the term frequency, saturation parameters, and document length normalization. The formula includes two key parameters. K1, with a default value of 1.2, controls term frequency saturation. B, with a default value of 0.75, controls length normalization. The formula also considers the document's length and the average document length across the corpus.
+
+BM25 makes two key improvements over TF-IDF. First, saturation: if a term appears 100 times in a document, that's not 100 times more relevant than appearing once. BM25 creates a saturation curve where additional occurrences have diminishing returns. Second, length normalization: long documents don't unfairly dominate the results. BM25 adjusts scores based on document length compared to the average.
+
+The implementation calculates term frequency by counting occurrences, computes document length and average document length, calculates IDF with smoothing to avoid division by zero, then applies the BM25 formula with saturation and length normalization.
+
+Boosting Fields
+
+Not all fields in a document are equally important. You can tell the search engine that matches in certain fields should count more than others.
+
+For example, when searching for "elasticsearch guide," you might want matches in the title field to be three times more valuable than matches in the body field, and matches in the description to be twice as valuable as the body. You express this by specifying fields with boost multipliers: "title^3", "description^2", and "body" with no multiplier, meaning 1x.
+
+Elasticsearch Architecture
+
+Cluster Components
+
+An Elasticsearch cluster consists of several types of nodes, each with specific responsibilities.
+
+Master nodes handle cluster-wide operations. They maintain the cluster state, which is the metadata about indices, shards, and node membership. They handle index creation, deletion, and settings changes. They coordinate shard allocation across the cluster.
+
+Data nodes store the actual indexed documents. They hold primary and replica shards. They execute indexing operations when new documents arrive. They execute search queries and return results.
+
+Coordinating nodes route queries to the appropriate data nodes. They receive search requests from clients. They aggregate results from multiple shards. They return the final response to the client. Note that any node can act as a coordinating node.
+
+Ingest nodes preprocess documents before indexing. They run pipelines that transform data. They enrich documents with additional information. They can parse complex formats like JSON or CSV.
+
+Sharding and Replication
+
+Let's walk through an example. Imagine an index called "products" containing 50 million documents. You configure it with 5 primary shards and 1 replica for each shard.
+
+The documents are distributed across nodes. Node 1 might hold primary shard 0 with 10 million documents and replica shard 1. Node 2 might hold primary shard 1 with 10 million documents and replica shard 2. Node 3 might hold primary shard 2 with 10 million documents and replica shard 0. Node 4 might hold primary shard 3 with 10 million documents and replica shard 4. Node 5 might hold primary shard 4 with 10 million documents and replica shard 3.
+
+How does Elasticsearch decide which shard gets a document? It uses a hash function. It takes the document ID, hashes it, and takes the modulo with the number of shards. This ensures even distribution and deterministic routing.
+
+Query Execution Flow
+
+Let's trace what happens when you search for "bluetooth headphones" in the products index.
+
+First, a coordinating node receives the search request. It determines which shards need to be queried. For a full index search, that's all shards. It broadcasts the query to all relevant shards.
+
+Next comes the query phase. Each shard independently parses the query, scores documents against the query, and returns just the top 10 document IDs and scores. So if you have 5 shards, you get back 50 document IDs total, 10 from each shard.
+
+Then the coordinating node performs a merge. It collects the top 10 results from each of the 5 shards, giving it 50 documents total. It performs a global sort by score across all 50. It selects the final top 10 documents.
+
+Finally comes the fetch phase. The coordinating node now knows which documents it needs, but it only has their IDs and scores, not their content. It sends fetch requests to the specific shards holding those documents. For example, it might ask shard 0 for documents 42 and 87, ask shard 1 for document 156, and ask shard 2 for documents 203 and 891. Each shard returns the full document content.
+
+The coordinating node assembles the final response with all 10 complete documents and returns it to the client.
+
+Query Types
+
+Full-Text Queries
+
+Match queries are analyzed queries that find relevant documents. When you search for "wireless bluetooth headphones" in the description field, Elasticsearch analyzes the query the same way it analyzed the documents during indexing. It finds documents containing any of those terms, even if they appear in different orders. It can match "bluetooth wireless earbuds" and "Wireless Headphones BT" because the underlying terms overlap.
+
+Match phrase queries are stricter. The words must appear in the exact order specified, and they must be adjacent. Searching for "quick brown fox" in the title field will match "the quick brown fox jumps" but won't match "quick fox brown" because the words are out of order.
+
+Structured Queries
+
+Term queries perform exact matches without analysis. They're used for structured data like status fields. Searching for status equal to "published" finds only documents where that field exactly matches "published."
+
+Range queries filter by numeric or date ranges. You can find all products where the price is greater than or equal to 100 and less than or equal to 500.
+
+Bool queries combine multiple conditions with boolean logic. The "must" clause contains conditions that must match and contribute to the score. The "filter" clause contains conditions that must match but don't affect scoring, making them faster and cacheable. The "should" clause contains optional conditions that boost the score if matched. The "must_not" clause contains conditions that must not match and don't affect scoring.
+
+For example, you might search for documents that must have "elasticsearch" in the title, must have status "published" and a date after January 1st 2024, should have "tutorial" in the tags for a score boost, and must not have author equal to "spam_bot."
+
+Fuzzy Queries
+
+Fuzzy queries handle typos and spelling variations by allowing some differences between the search term and the indexed term.
+
+For example, if someone searches for "elasticsaerch" with a typo, a fuzzy query with fuzziness set to "AUTO" will still match "elasticsearch." Fuzziness is measured by edit distance, the number of single-character changes needed to transform one word into another.
+
+Fuzziness levels work as follows. Zero means exact match only. One allows one edit operation, which could be an insertion, deletion, substitution, or transposition. Two allows two edit operations. AUTO adjusts based on term length: it uses 0 for terms with 1 to 2 characters, 1 for terms with 3 to 5 characters, and 2 for terms with 6 or more characters.
+
+Index Design Best Practices
+
+Mapping Definition
+
+When you create an index, you define a mapping that specifies how each field should be indexed. Let me walk through a well-designed mapping for a product catalog.
+
+The title field is defined as type "text" so it's analyzed for full-text search, using the English analyzer for proper stemming and stop word removal. It also includes a sub-field called "raw" of type "keyword" for exact matching, sorting, and aggregations.
+
+The price field uses type "scaled_float" with a scaling factor of 100. This avoids floating-point precision issues by storing prices as integers internally. A price of $19.99 is stored as 1999.
+
+The category field is type "keyword" for exact matching and aggregations. You'd use this in faceted search to show how many products are in each category.
+
+The created_at field is type "date" for time-based queries and sorting.
+
+The tags field is type "keyword" because tags are exact values, not full-text.
+
+The description field is type "text" with the English analyzer for full-text search.
+
+Field Type Selection
+
+Choosing the right field type is crucial. Let me walk through the common patterns.
+
+For free text like product descriptions or blog content, use type "text." This enables full-text search with analysis.
+
+For identifiers like product SKUs or user IDs, use type "keyword." This enables exact matching, sorting, and aggregations.
+
+For numbers like quantities or IDs, use "integer" or "long." For decimal numbers like ratings, use "float." For these types, you can perform range queries and sorting.
+
+For money, use "scaled_float" to avoid floating-point rounding errors.
+
+For dates and timestamps, use type "date." This enables range queries and special date math.
+
+For true/false flags, use type "boolean." These are commonly used in filter clauses.
+
+For nested objects where you need to query array elements independently, use type "nested." This is important when you have an array of objects and need to ensure query conditions apply to the same object, not across different objects in the array.
+
+Multi-field Mapping
+
+A powerful pattern is mapping the same field in multiple ways. For example, you might map a title field as type "text" with an English analyzer for full-text search. But you also include a "raw" sub-field of type "keyword" for exact matching and sorting. And you include an "autocomplete" sub-field with a special autocomplete analyzer for search suggestions.
+
+You can then query different aspects of the same data. Query "title.raw" for exact match. Query "title" for full-text search. Query "title.autocomplete" for autocomplete suggestions as the user types.
+
+Performance Optimization
+
+Index Settings
+
+Several settings dramatically impact performance.
+
+Number of shards determines parallelism. You should plan for growth here because you can't change the shard count after index creation without reindexing.
+
+Number of replicas provides fault tolerance and read scaling. Each replica is a complete copy of the primary shard. With one replica, you can lose one node without data loss, and reads can be served from either primary or replica.
+
+Refresh interval controls how quickly new documents become searchable. The default is 1 second, meaning documents are searchable within 1 second of indexing. Increasing this to 30 seconds can significantly improve indexing throughput if you can tolerate less real-time visibility.
+
+Transaction log durability set to "async" provides faster indexing at the cost of a slight durability risk. By default, Elasticsearch fsyncs the transaction log on every request, which is slow. Async mode fsyncs every 5 seconds.
+
+Query Optimization
+
+Some query patterns are much more expensive than others.
+
+Leading wildcards are particularly expensive. Searching for email addresses ending with "@gmail.com" using a wildcard like "*@gmail.com" forces Elasticsearch to scan the entire term dictionary. Instead, you should index a separate field for the email domain and do an exact match on "gmail.com."
+
+Deep pagination is also expensive. Using "from: 10000, size: 10" to get page 1000 of results means Elasticsearch must collect 10,010 results from each shard, then discard the first 10,000. For deep pagination, use the search_after parameter instead. You sort by a field and provide the last document's sort values. Elasticsearch then efficiently finds documents after that point.
+
+Caching
+
+Elasticsearch maintains several caches to improve performance.
+
+The node query cache, also called the filter cache, caches the results of filter clauses like term filters and range filters. This only works for filter context, not for must or should clauses that contribute to scoring. The cache is invalidated whenever the index is refreshed with new data.
+
+The shard request cache caches entire search responses, but only for searches with size equals zero. These are typically aggregation-only queries. The cache is also invalidated on refresh.
+
+The field data cache is used for sorting and aggregations on text fields. You should avoid this because it's memory-intensive. Instead, use keyword fields for sorting and aggregations.
+
+Search System Comparison
+
+Let me compare the major search systems across several dimensions.
+
+Elasticsearch and Apache Solr can both scale to billions of documents. Meilisearch and Typesense typically handle up to millions of documents. PostgreSQL full-text search also works best with millions of documents.
+
+For setup complexity, Elasticsearch is medium difficulty. Apache Solr is high complexity. Meilisearch and Typesense are low complexity, designed for developer experience. PostgreSQL is the lowest complexity because you likely already have it.
+
+Query latency for Elasticsearch and Apache Solr typically ranges from 10 to 100 milliseconds. Meilisearch ranges from 1 to 50 milliseconds. Typesense is even faster, from 1 to 20 milliseconds. PostgreSQL full-text search can range from 10 to 500 milliseconds depending on dataset size and query complexity.
+
+For typo tolerance, Elasticsearch and Solr require configuration. Meilisearch and Typesense have it built-in by default. PostgreSQL has limited typo tolerance.
+
+Relevance tuning is extensive in Elasticsearch and Solr, offering fine-grained control. Meilisearch offers limited tuning. Typesense offers medium tuning capabilities. PostgreSQL offers basic tuning.
+
+For real-time search, Elasticsearch and Solr are near real-time with about a 1-second delay. Meilisearch and Typesense are instant. PostgreSQL is also instant.
+
+Operational burden is high for Elasticsearch and Solr, requiring dedicated DevOps attention. It's low for Meilisearch and Typesense. It's lowest for PostgreSQL since you're already running it.
+
+When to Use What
+
+Use PostgreSQL full-text search when you already have Postgres, search is a secondary feature of your application, and you have less than 1 million documents. The operational simplicity is a huge advantage for smaller use cases.
+
+Use Elasticsearch when you need large scale, handling hundreds of millions or billions of documents. Use it when you need complex queries combining full-text search with structured filters and aggregations. Use it when you need analytics on your search data, like tracking what people search for. Use it for enterprise requirements where you need the full power and ecosystem.
+
+Use Meilisearch or Typesense when developer experience matters and you want to get started quickly. Use them when you need instant setup without complex configuration. Use them for smaller datasets in the millions of documents. Use them for consumer-facing search where the instant typo tolerance and relevance out of the box create a better user experience.
+
+Key Concepts Checklist
+
+Let me summarize what you should be able to explain about search systems.
+
+You should be able to explain how inverted indexes work and why they're fast, specifically how they flip the relationship from documents-to-terms into terms-to-documents, enabling lookups rather than scans.
+
+You should be able to describe the text analysis pipeline, including tokenization to split text into words, stemming to reduce words to root forms, and stop word removal to eliminate common words.
+
+You should be able to calculate relevance with TF-IDF and explain how BM25 improves on it through saturation and length normalization.
+
+You should be able to design an index mapping with appropriate field types, knowing when to use text versus keyword, how to use multi-field mapping, and how to structure nested documents.
+
+You should be able to choose shard count based on data size and query patterns, understanding the trade-offs between too few shards causing hot spots and too many shards causing coordination overhead.
+
+You should be able to optimize queries by avoiding expensive patterns like leading wildcards, using filter context instead of must context when scoring isn't needed, and implementing deep pagination with search_after instead of from and size.
+
+You should be able to implement deep pagination with search_after, understanding why it's more efficient than offset-based pagination.
+
+Practical Insights
+
+Let me share some battle-tested wisdom about running search systems in production.
+
+Shard Sizing Rules of Thumb
+
+Target 10 to 50 gigabytes per shard. This is the sweet spot for most use cases. More shards means more parallelism, which can improve query performance and indexing throughput. However, it also means higher coordination overhead and more file handles. Too few shards creates hot spots where some nodes are overloaded while others are idle. Too many shards creates coordination overhead where the master node and coordinating nodes spend too much time managing all the shards. Critically, you can't change shard count after index creation. If you need a different number of shards, you must create a new index and reindex all your data.
+
+Index Lifecycle
+
+For time-series data like logs or metrics, use time-based indices with names like "logs-2024.01.01." Create a new index each day or week. This makes it easy to delete old data by simply dropping old indices.
+
+Implement Index Lifecycle Management policies that move data through different tiers. Hot nodes with SSDs store recent data that's actively searched. Warm nodes with slower storage hold older data that's searched less frequently. Cold nodes with the cheapest storage hold archival data. Eventually, you delete very old data according to your retention policy.
+
+Search Relevance is Iterative
+
+Don't expect perfect relevance on day one. Start with default settings and measure performance with real user queries. Use the Explain API to understand why documents are scored the way they are. A/B test relevance changes to see if they actually improve user engagement. Monitor queries that return no results and queries that get low engagement, like users not clicking any results. These indicate relevance problems that need tuning.
+
+Operational Realities
+
+Elasticsearch clusters need active management. They don't just run themselves. JVM heap sizing is critical. The general rule is to allocate half your system RAM to Elasticsearch's heap, but never exceed 32 gigabytes because the JVM loses important optimizations above that threshold.
+
+To prevent split-brain scenarios where the cluster splits into two separate clusters that both think they're the primary, set minimum_master_nodes to the number of master-eligible nodes divided by 2, plus 1. For example, with 3 master nodes, you'd set it to 2.
+
+Always back up your cluster by taking snapshots to S3, Google Cloud Storage, or another repository. Elasticsearch is not a primary data store, but losing your search index still causes a major outage.
+
+When NOT to Use Elasticsearch
+
+Finally, let me be clear about when you shouldn't use Elasticsearch.
+
+Don't use it as your primary data store. It's a search engine, not a database. The source of truth for your data should be in a proper database like PostgreSQL or MongoDB.
+
+Don't use it when you need sub-millisecond latency. Elasticsearch typically delivers results in tens of milliseconds, which is fast for search but not fast enough for every use case.
+
+Don't use it for simple exact-match queries. If you're just looking up records by ID or doing equality checks, use your regular database. It's faster and simpler.
+
+Don't use it when you're cost-sensitive with small data. Running an Elasticsearch cluster has significant operational overhead. For small datasets, the complexity and cost often outweigh the benefits. PostgreSQL full-text search or a simpler solution is usually better.
+
+This concludes Chapter 13 on Search Systems and Elasticsearch.

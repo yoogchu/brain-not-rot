@@ -1,0 +1,195 @@
+Chapter 33: LLM Serving and Optimization
+
+Why Optimize LLM Serving?
+
+Let me start by painting a picture of why optimization matters so much in LLM serving. Imagine you have a user who sends a 100-token prompt to your service. Your model is Llama 70B running on an A100 80GB GPU. Without any optimization, here's what happens. The first token takes 500 milliseconds because of prompt processing. Each subsequent token takes 80 milliseconds to generate. Your GPU memory needs 150 gigabytes, which means you get an out of memory error since the A100 only has 80 gigabytes. And you're paying $3.50 per hour for a GPU that sits idle while waiting.
+
+Now contrast that with a properly optimized setup. With optimization, your first token comes back in just 100 milliseconds thanks to KV cache. Subsequent tokens take only 30 milliseconds each because of batching. Your GPU memory usage drops to 45 gigabytes through quantization and paging. And that same GPU can now serve 10 times more requests, making your cost per request dramatically lower.
+
+LLM inference, or serving, is fundamentally different from training. It's memory-bound, not compute-bound. About 70% of your GPU memory is consumed by something called the KV cache. It's also latency-sensitive, meaning users notice even 100 millisecond delays. And it's cost-intensive, with hosted APIs charging anywhere from $1 to $10 per million tokens.
+
+Autoregressive Generation Fundamentals
+
+Let's talk about the problem at the heart of LLM serving. LLMs generate text one token at a time, but each token needs context from all previous tokens. For example, if your prompt is "Write a poem about," the first token might be "the," which needs the prompt context. The second token "ocean" needs both the prompt and token 1. The third token, an apostrophe s, needs the prompt plus tokens 1 and 2. And so on.
+
+Each token requires running the full transformer forward pass, which gets expensive very quickly.
+
+To understand how this works, you need to know about the two phases of generation. Think of the process as having three stages: prefill, then decode for token 1, then decode for token 2, and so on. In the prefill phase, the input is your full prompt. The output is a KV cache plus the first token. This phase is compute intensive. In the decode phases, the input is each new token plus the KV cache. The output is an updated KV cache plus the next token. These phases are memory intensive.
+
+The prefill phase is compute-bound. The system processes the entire prompt in parallel, generates KV cache for all prompt tokens, and typically takes around 500 milliseconds for a 1000-token prompt on an A100.
+
+The decode phase is memory-bound. It generates one token at a time, reads the KV cache from memory for attention calculations, and typically takes 50 to 100 milliseconds per token.
+
+Let me break down the memory requirements for Llama 70B. The model parameters alone are 70 billion parameters times 2 bytes for FP16 precision, which equals 140 gigabytes. The KV cache per token is calculated as 80 layers times 2 for key and value, times 8 heads, times 128 dimensions, times 2 bytes. This comes out to about 327,680 bytes, or roughly 0.33 megabytes per token. For a 2048-token context, the KV memory is about 671 megabytes per request. If you're batching 32 requests together, that's about 21 gigabytes just for the KV cache alone.
+
+Why does this matter? The KV cache grows linearly with sequence length and batch size. Memory becomes the bottleneck that limits throughput. And you cannot serve multiple requests without smart memory management.
+
+KV Cache and Memory Management
+
+Now let's dive deeper into the KV cache problem. The KV cache stores attention keys and values for all previous tokens. For long contexts or large batches, this explodes in size.
+
+Without KV cache, you would recompute attention for all tokens at every step. If you generate 100 tokens, that's 100 full forward passes, which equals 5,050 token computations total. With KV cache, you store previous computations. Those same 100 tokens only require 100 incremental computations. That's a 50 times speedup! But there's a catch: memory grows linearly with sequence length.
+
+Here's a memory explosion example. Consider a GPT-3 style model with 96 layers, 96 heads, and 128 dimensions per head. You have a context length of 4096 tokens and a batch size of 16. The KV cache size is calculated as batch times sequence length times layers times 2 times heads times dimension times bytes. That's 16 times 4096 times 96 times 2 times 96 times 128 times 2, which equals 24 gigabytes of KV cache alone. This is more than the model weights themselves on an A100 with 40 gigabytes.
+
+The traditional approach uses static allocation. You pre-allocate the worst case scenario. For example, you might allocate a tensor of shape batch size by max sequence length by number of layers by 2 for key and value by number of heads by head dimension. You often pad the max sequence length to 4096 or 8192.
+
+This approach has serious problems. It wastes memory on short sequences. It forces a fixed batch size and cannot mix different lengths. And you get fragmentation as sequences finish at different times.
+
+PagedAttention and vLLM
+
+The problem with traditional KV cache is that it allocates contiguous memory blocks. Sequences of different lengths waste massive amounts of space. Imagine sequence 1 is just "Hi," which is 2 tokens, but you've allocated 2048 slots. Those 2046 empty slots are wasted space. Sequence 2 might be "Write essay," which is 1500 tokens, but again you allocated 2048 slots, wasting 548. Studies show 30 to 40% of memory is wasted on this kind of fragmentation.
+
+PagedAttention solves this, and it's inspired by virtual memory in operating systems. The key innovation is to break the KV cache into fixed-size pages.
+
+Think of it like this: You have a virtual memory layer with a page table sitting on top. Below that, you have your actual sequences. Sequence 1 has logical pages 0, 1, and 2. Sequence 2 has logical pages 0, 1, 2, and 3. These logical pages map to physical memory, which is a pool of KV cache blocks. The page size might be 16 tokens. So sequence 1 with 40 tokens uses physical pages 0, 1, and partially page 2. Sequence 2 with 70 tokens uses physical pages 3, 4, 5, and partially page 6. There's no fragmentation! Only the last page of each sequence is partial.
+
+The implementation concept involves a physical memory pool of blocks, a free block pool to track available blocks, and a page table that maps sequence IDs to lists of block IDs. When you allocate a sequence, you pop a block from the free pool and add it to the page table. When you append a token, you check if the current block is full. If it is, you allocate a new block. Otherwise, you write the KV to the current block. When you free a sequence, you return all its blocks to the free pool.
+
+The vLLM architecture ties this all together. At the top is the vLLM engine. Inside, you have a scheduler that feeds into continuous batching, which works with the PagedAttention KV cache layer, which finally executes on GPU kernels.
+
+Let's compare PagedAttention to static allocation. For memory efficiency, PagedAttention achieves 90% plus utilization, while static allocation only gets 50 to 60% due to fragmentation. PagedAttention is more complex, requiring page table management, while static allocation is simple. For throughput, PagedAttention delivers 2 to 4 times higher performance. Latency is the same for both. Implementation-wise, PagedAttention requires custom CUDA kernels, while static allocation uses standard PyTorch.
+
+When should you use PagedAttention? Use it for production serving with variable-length requests. When should you NOT use it? Skip it for single-user inference or research prototyping where the complexity isn't worth it.
+
+Continuous Batching
+
+Now let's talk about continuous batching. Traditional batching waits for all sequences in a batch to complete. Imagine you have a batch size of 4, with sequence lengths of 10, 50, 200, and 500 tokens.
+
+Picture a timeline where sequence 1 finishes at step 10 but then sits idle waiting for the others. Sequence 2 finishes at step 50 and waits. Sequence 3 finishes at 200 and waits. Only sequence 4 actually runs all the way to step 500. The GPU sits idle while waiting for the longest sequence. Your throughput is just 4 sequences divided by 500 steps, which is 0.008 sequences per step.
+
+Continuous batching changes this completely. You remove completed sequences and add new ones during generation. At step 0, you have sequences 1, 2, 3, and 4 with a batch size of 4. At step 10, sequence 1 finishes, so you immediately add sequence 5 to replace it. At step 50, sequence 2 finishes and you add sequence 6. At step 200, sequence 3 finishes and you add sequence 7. The GPU is always busy! There's no waiting for the batch to complete.
+
+The flow works like this: You have a request queue holding requests R1, R2, R3. The scheduler runs at each step and checks the active batch. It removes finished sequences, adds new sequences from the queue, and ensures everything fits in GPU memory. The active batch has a variable size at each step. Finally, you generate one token for each sequence in the active batch.
+
+The implementation involves a request queue, a dictionary of active sequences, and a paged KV cache. When you add a request, you generate an ID and append it to the queue. At each step, you remove finished sequences and free their KV cache. Then you add new sequences from the queue as long as you haven't hit max batch size, the queue isn't empty, and the KV cache has free blocks. Finally, you generate one token for all active sequences.
+
+The performance impact is dramatic. With traditional static batching at batch size 8, averaging 200 tokens but with the longest at 800 tokens, your throughput is just 0.01 sequences per step. With continuous batching, you maintain an average batch size of 6 to 8 that's dynamic, and your throughput jumps to about 0.04 sequences per step. That's a 4 times improvement!
+
+When should you use continuous batching? Use it for high-throughput serving with variable request lengths. When should you NOT use it? Avoid it when you need guaranteed latency SLAs, because the per-request timing becomes unpredictable.
+
+Quantization
+
+Let's talk about why quantization is necessary. Model weights consume massive memory. Llama 70B in FP16 is 140 gigabytes. GPT-3 175B in FP16 is 350 gigabytes. Most consumer and server GPUs only have 24 to 80 gigabytes. You need multiple GPUs or you need to reduce precision.
+
+Quantization works by reducing the precision of weights and activations. Let's look at the different precision formats. FP32 uses 32 bits, has a range of plus or minus 3.4 times 10 to the 38th power, and for 70 billion parameters would require 280 gigabytes. FP16 uses 16 bits, has a range of plus or minus 65,504, and requires 140 gigabytes. BF16 also uses 16 bits but with a wider range like FP32, also requiring 140 gigabytes. INT8 uses 8 bits, ranges from negative 128 to 127, and only needs 70 gigabytes. INT4 uses just 4 bits, ranges from negative 8 to 7, and requires only 35 gigabytes.
+
+There are two main quantization methods. Post-training quantization, or PTQ, converts an already trained model. Quantization-aware training, or QAT, trains with quantization in mind from the start.
+
+INT8 quantization is the simplest form. You perform symmetric quantization by finding the scale factor, which is the maximum absolute value divided by 127. Then you quantize by rounding the FP16 weight divided by the scale and converting to INT8. To dequantize for computation, you convert the INT8 weight back to FP16 and multiply by the scale. The memory savings are significant: FP16 needs 140 gigabytes, INT8 needs 70 gigabytes for a 2x reduction, and INT4 needs 35 gigabytes for a 4x reduction.
+
+GPTQ, which stands for Gradient-based Post-Training Quantization, is more sophisticated. It minimizes quantization error using second-order information. The algorithm computes the Hessian, which represents the second derivative of the loss with respect to weights. Then it quantizes weights in order of importance. For each weight, it quantizes and then compensates for the error in the remaining weights using the Hessian information.
+
+The accuracy comparison is revealing. For Llama 70B on standard benchmarks measured by perplexity, where lower is better, FP16 achieves 10.2 as the baseline. Naive INT8 gets 10.8, which is 0.6 worse or about 6% degradation. GPTQ INT4 gets 10.4, only 0.2 worse or 2% degradation. AWQ INT4 gets 10.3, just 0.1 worse or 1% degradation. GPTQ maintains quality even at 4-bit precision!
+
+AWQ, or Activation-aware Weight Quantization, protects important weights based on activation magnitudes. The key insight is that not all weights are equally important. Weights with larger activations contribute more to the output. If you look at an activation magnitude distribution, you see that a small percentage of weights are far more important than others. The strategy is to keep the top 1% of weights in FP16 and quantize the rest to INT4.
+
+Comparing the different methods: FP16 gives you baseline accuracy at 1x speed and 1x memory with no setup complexity. INT8 loses 1 to 3% accuracy but gives 1.5x speed at half the memory with low setup complexity. GPTQ INT4 loses 1 to 2% accuracy, gives 2x speed at a quarter of the memory, but needs medium complexity for calibration. AWQ INT4 loses only 0.5 to 1% accuracy, gives 2.5x speed at a quarter memory, and also needs medium complexity for calibration.
+
+When should you use quantization? Always quantize for production because you get a 2 to 4x throughput gain. When should you NOT use it? Skip quantization for research tasks requiring exact FP16 accuracy.
+
+Model Parallelism
+
+Now let's address the problem of models that don't fit on a single GPU. An A100 with 80 gigabytes cannot fit Llama 70B, which needs 140 gigabytes. An H100 with 80 gigabytes cannot fit GPT-4 scale models with over 1 trillion parameters. You need to split the model across multiple GPUs.
+
+Tensor parallelism splits individual layers across GPUs. Imagine a single GPU setup that won't fit. You have a layer that's a linear transformation from 4096 to 16,384 dimensions. The weight matrix is 16,384 by 4,096, which is 64 million parameters. That won't fit in memory.
+
+With tensor parallelism across 2 GPUs, GPU 0 has a linear layer from 4096 to 8192, with weights of shape 8192 by 4096. GPU 1 also has a linear layer from 4096 to 8192 with the same shape. Each GPU computes its portion, and then you concatenate the outputs.
+
+The implementation involves each GPU getting one divided by world size of the output dimension. Each GPU stores its weight shard. During the forward pass, each GPU computes its local output shard. Then all GPUs gather results and concatenate them.
+
+The communication pattern for the forward pass is: input gets broadcast to all GPUs, all GPUs compute their portion, then you do an all-reduce operation to get the output. The backward pass for training is similar.
+
+Pipeline parallelism takes a different approach. It splits the model into stages across GPUs. With 4 GPUs, you might put layers 0 through 20 on GPU 0, layers 21 through 40 on GPU 1, layers 41 through 60 on GPU 2, and layers 61 through 80 on GPU 3. The data flows from one GPU to the next like a pipeline.
+
+To keep all GPUs busy, you use microbatching. At time 0, batch 1 starts on GPU 0. At time 1, batch 2 starts on GPU 0 while batch 1 moves to GPU 1. At time 2, batch 3 starts on GPU 0, batch 2 moves to GPU 1, and batch 1 moves to GPU 2. By time 3, all four GPUs are processing different microbatches simultaneously.
+
+Comparing the two approaches: Tensor parallelism has high communication overhead at every layer but no bubble time where GPUs sit idle. It's complex to implement and works best with high-bandwidth interconnects like NVLink. Pipeline parallelism has low communication, only at stage boundaries, but suffers from 10 to 30% bubble time waiting for microbatches. It's moderately complex and works better for multiple nodes. For memory per GPU, tensor parallel splits evenly, while pipeline parallel can be uneven since the first layers are often larger.
+
+Real deployments often use a hybrid approach combining both. For example, with 8 GPUs, you might use tensor parallel equals 2 and pipeline equals 4. Stage 0 covering layers 0 through 20 runs on GPUs 0 and 1 as a tensor parallel group. Stage 1 covering layers 21 through 40 runs on GPUs 2 and 3 as a tensor parallel group. Stage 2 covering layers 41 through 60 runs on GPUs 4 and 5 as a tensor parallel group. And stage 3 covering layers 61 through 80 runs on GPUs 6 and 7 as a tensor parallel group.
+
+When should you use tensor parallelism? Use it when the model doesn't fit on one GPU and you have fast interconnect. When should you use pipeline parallelism? Use it for serving long sequences or multi-node deployment. Use the hybrid approach for large models like 70B plus parameters on multi-node clusters.
+
+When should you NOT use model parallelism? Skip it when your model fits on a single GPU because the overhead isn't worth it. Also avoid it for high latency requirements since parallelism adds communication delay.
+
+Streaming Responses
+
+Let's talk about why streaming matters. Users want to see output as it's generated, like ChatGPT does, not wait for the full completion. Without streaming, the user sends a prompt, waits 30 seconds, then receives the full response. With streaming, the user sends a prompt, waits 0.5 seconds for the first word, then 0.5 seconds for the next word, and so on. The perceived latency is 0.5 seconds instead of 30 seconds!
+
+Streaming works using Server-Sent Events, or SSE, or WebSocket to stream tokens. The architecture has a client, like a browser, that sends an HTTP request to a FastAPI server, which communicates asynchronously with the vLLM engine. The engine generates tokens and sends them back through an SSE stream, which delivers tokens one by one to the client.
+
+The server implementation uses FastAPI with a streaming response. You create an endpoint that takes a prompt and max tokens. Inside, you define an async token generator function. You create sampling parameters with streaming enabled. The vLLM library returns an async generator. You iterate over outputs, and for each output you yield the token in SSE format, which is "data:" followed by JSON. When done, you signal completion. Finally, you return a StreamingResponse with media type "text/event-stream."
+
+The client implementation makes a POST request with streaming enabled. It iterates over lines in the response. For each line that starts with "data:", it parses the JSON. If the data indicates done, it breaks. Otherwise, it prints the token immediately with flush enabled.
+
+A useful optimization is buffering. Instead of sending every single token, you can buffer tokens before sending to reduce overhead. You might accumulate 5 tokens before flushing. This reduces HTTP overhead by 80% while maintaining responsiveness.
+
+When should you use streaming? Use it for user-facing chat interfaces and long-form generation. When should you NOT use it? Skip streaming for batch processing or API integrations that need the full text at once.
+
+Framework Comparison
+
+Now let's compare the major frameworks for LLM serving: vLLM, TensorRT-LLM, Text Generation Inference or TGI, and Ollama.
+
+For throughput, both vLLM and TensorRT-LLM are excellent. vLLM achieves this through PagedAttention, while TensorRT-LLM uses optimized kernels. TGI is good, and Ollama is also good.
+
+For latency, TensorRT-LLM is the best thanks to CUDA optimizations. vLLM, TGI are good, while Ollama is moderate.
+
+For memory efficiency, vLLM is the best with its paged approach. TensorRT-LLM and TGI are good, while Ollama is moderate.
+
+For ease of use, Ollama is the highest with its simple CLI. vLLM and TGI are high. TensorRT-LLM is low because it requires C++ and TensorRT knowledge.
+
+For model support, vLLM has wide support. TensorRT-LLM also has wide support but needs conversion. TGI supports HuggingFace models, while Ollama focuses on popular open source models.
+
+For quantization, vLLM supports GPTQ, AWQ, and SqueezeLLM. TensorRT-LLM supports INT8, INT4, and FP8. TGI supports GPTQ and bitsandbytes. Ollama supports GGUF format with INT4 and INT8.
+
+For multi-GPU support, vLLM and TensorRT-LLM both support tensor and pipeline parallelism. TGI supports tensor parallelism. Ollama has limited support.
+
+All four support streaming. vLLM, TensorRT-LLM, and TGI are production-ready, while Ollama is more of a development tool.
+
+For best use cases: vLLM is best for high-throughput API serving. TensorRT-LLM is best for lowest latency. TGI is best for ease of deployment. Ollama is best for local development.
+
+vLLM is ideal for production API serving with variable request lengths. You create an LLM instance with your model, set tensor parallel size to 4, use AWQ quantization, and set max model length to 4096. Continuous batching automatically handles variable lengths.
+
+TensorRT-LLM is best for absolute lowest latency, though it trades complexity for speed. You need to build a TensorRT engine ahead of time. First, you convert the model checkpoint. Then you build the engine. Finally, you run inference.
+
+Text Generation Inference is best for easy deployment with Docker. You run a Docker container, map port 8080 to 80, mount a data volume, specify the model ID, enable quantization with GPTQ, and set max total tokens.
+
+Ollama is best for local development and testing. You pull a model like llama2 70b, then run it with a simple command. It also provides a simple API via curl.
+
+Cost Optimization Strategies
+
+Let's analyze when to use APIs versus self-hosting. The key is monthly volume analysis. For cost per million tokens, OpenAI GPT-4 charges $30 for input and $60 for output. Anthropic Claude charges $15 for input and $75 for output. Self-hosted Llama 70B costs about $2 to $5 per million tokens when amortized.
+
+Here's the break-even calculation. An A100 80GB GPU costs $3.50 per hour, which is $2,520 per month. If you're using GPT-4 at an average of $40 per million tokens, your break-even point is $2,520 divided by $40, which is 63 million tokens per month. Below 63 million tokens per month, use the API. Above 63 million tokens per month, self-host.
+
+Let's look at a real-world example: a customer support chatbot. You have 10,000 conversations per day, averaging 500 tokens per conversation with 300 input and 200 output, running 30 days per month. That's 150 million tokens monthly.
+
+With OpenAI GPT-4, you calculate 10,000 times 300 times 30 times $0.00003 for input, which is $2,700. Plus 10,000 times 200 times 30 times $0.00006 for output, which is $3,600. Total cost is $6,300 per month.
+
+With self-hosted Llama 70B on 4 A100s, your GPU cost is 4 times $2,520, which is $10,080 per month. But you can handle 3 to 4 times more throughput, so you can serve other use cases. The effective cost for this particular use case is $10,080 divided by 4, which is $2,520 per month. Your savings are $6,300 minus $2,520, which equals $3,780 per month.
+
+For GPU selection, here's a guide. For Llama 7B in FP16, use an RTX 4090 with 24 gigabytes. It costs $1,600 and fits the model plus a small batch. For Llama 13B in INT4, also use an RTX 4090, since quantization makes it fit. For Llama 70B in INT4, use an A100 40GB as the minimum for decent throughput. For Llama 70B in FP16, use 2 A100 80GB GPUs with 160 gigabytes total for tensor parallelism and high throughput. For GPT-3 scale at 175 billion parameters, use 4 A100 80GB GPUs with 320 gigabytes total for pipeline plus tensor parallelism.
+
+Key Concepts Checklist
+
+Let me summarize the key concepts you need to master. First, understand autoregressive generation, specifically the difference between prefill and decode phases. Second, explain the KV cache memory bottleneck and why it matters. Third, describe PagedAttention and why it improves memory efficiency. Fourth, compare continuous batching versus static batching. Fifth, explain quantization methods like INT8, GPTQ, and AWQ, along with their accuracy trade-offs. Sixth, understand tensor parallelism versus pipeline parallelism. Seventh, implement streaming responses with Server-Sent Events. Eighth, choose the right framework, whether vLLM, TensorRT-LLM, or TGI, based on your requirements. Ninth, calculate the cost break-even point between using APIs and self-hosting. Finally, know when NOT to optimize, such as for low volume, research, or prototyping scenarios.
+
+Practical Insights
+
+Now let me share some practical insights from real-world deployments.
+
+First, memory is the bottleneck, not compute. Most inference time is spent reading KV cache from memory, which is memory-bound, not doing math, which is compute-bound. This is why quantization helps so much. Less memory to read means faster generation.
+
+Second, there's a batch size sweet spot. If your batch size is too small, like 1 to 4, the GPU is underutilized and you get only about 10 tokens per second throughput. At the optimal batch size of 16 to 32, the GPU is 70 to 80% utilized and you get about 80 tokens per second throughput. If your batch size is too large, like 64 plus, you hit GPU memory out-of-memory errors or high KV cache eviction, and your throughput actually drops to about 60 tokens per second due to cache thrashing.
+
+Third, continuous batching is a game-changer. In production, request lengths vary wildly from 20 to 2000 tokens. Static batching wastes 50 to 70% of GPU time waiting for the longest sequence. Continuous batching achieves near-perfect GPU utilization.
+
+Fourth, there's a trade-off between first token latency and throughput. When optimizing for latency for a single user, you use batch size 1, don't wait in a queue, get 50 millisecond latency, but only achieve 20 requests per second throughput. When optimizing for throughput for multiple users, you use batch size 32, queue up to 100 milliseconds, get 150 millisecond latency, which is 50 milliseconds plus 100 milliseconds queue time, but you achieve 320 requests per second throughput. That's 16 times more!
+
+Fifth, quantization is almost always worth it. GPTQ or AWQ INT4 loses less than 1% accuracy but cuts memory by 4x. This means you can fit 4 times more requests in the same batch, which translates to 3 to 4 times more throughput. The latency per token stays the same or actually improves.
+
+Sixth, monitor GPU memory fragmentation carefully. You can track memory usage using PyTorch. Calculate allocated memory divided by a billion to get gigabytes. Calculate reserved memory the same way. Then compute fragmentation as reserved minus allocated, divided by reserved, times 100. Alert if fragmentation exceeds 30%. This indicates KV cache thrashing or memory leaks.
+
+Finally, streaming isn't just about user experience, it's about reliability. Long generations of 1000 plus tokens can timeout HTTP connections. Streaming keeps the connection alive and lets you handle partial failures gracefully.
+
+This concludes Chapter 33 on LLM Serving and Optimization.

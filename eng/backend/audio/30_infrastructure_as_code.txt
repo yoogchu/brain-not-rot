@@ -1,0 +1,238 @@
+Chapter 30: Infrastructure as Code
+
+Why Infrastructure as Code?
+
+Let me paint you a picture of what happens without Infrastructure as Code, or IaC as we call it. Imagine this scenario: An engineer comes in and says "I deployed to production last night." The manager naturally asks, "What changed?" And the engineer responds, "Uh, I clicked around the AWS console, changed some settings." The manager follows up with "Which settings?" and the engineer can only say "I don't remember. But it's working now."
+
+Fast forward two weeks later. A new engineer joins and says "I need to replicate the production environment." The result? Three days of manual clicking, configuration drift everywhere, and subtle bugs that are nearly impossible to track down.
+
+Infrastructure as Code solves these critical problems. First, it provides reproducibility, meaning you get the exact same infrastructure every single time you deploy. Second, it gives you version control through Git, so you have a complete history of all infrastructure changes. Third, it enables code review, meaning you can have pull requests for infrastructure changes just like you do for application code. Fourth, it dramatically improves disaster recovery, allowing you to rebuild everything from scratch in hours instead of weeks. And finally, the code itself becomes the documentation, so you're never left wondering how something is configured.
+
+Manual infrastructure management simply doesn't scale. Consider this: one typo in a security group rule can expose your entire database to the internet. With Infrastructure as Code, this kind of mistake gets caught during code review before it ever reaches production.
+
+Declarative versus Imperative
+
+Let's talk about the fundamental difference between declarative and imperative approaches to infrastructure management.
+
+With the imperative approach, you tell the system HOW to build infrastructure. Think of it like writing a script. You might write a function called create infrastructure that first creates a VPC with a specific CIDR block, then creates a subnet using that VPC's ID, then creates an instance in that subnet, then checks if a security group exists and creates it if it doesn't, and finally attaches that security group to the instance. It's very step-by-step, very procedural.
+
+In contrast, the declarative approach tells the system WHAT you want, and it figures out HOW to do it. You simply declare that you want a VPC resource with certain properties, a subnet resource with certain properties, and an instance resource with certain properties. The infrastructure tool handles all the details of creation order and dependency management.
+
+Here's the critical difference: what happens when you run the same code a second time? With the imperative approach, it tries to create everything again, leading to duplicates and errors. With the declarative approach, the tool compares your desired state to the actual current state and realizes no changes are needed.
+
+The declarative workflow works like this: First, you have your desired state, which is defined in your code files. Second, the tool reads the current state by querying the actual infrastructure in AWS or wherever it's deployed. Third, it generates an execution plan that shows exactly what needs to change. The plan indicates new resources to create with a plus sign, resources to modify with a tilde, and resources to delete with a minus sign.
+
+When should you use declarative versus imperative? For most infrastructure work, declarative is strongly preferred. It's more predictable, more maintainable, and safer. However, imperative approaches are still useful for complex migrations, one-off scripts, or when you have conditional logic that's too complex to express declaratively.
+
+Terraform Fundamentals
+
+Let's explore Terraform, which is the most popular Infrastructure as Code tool in the industry today.
+
+The problem Terraform solves is this: you need to manage cloud infrastructure across multiple providers like AWS, Google Cloud Platform, and Azure. Each provider has different CLI tools, different APIs, and different concepts. The learning curves multiply rapidly.
+
+How Terraform works is it provides a unified syntax called HCL, which stands for HashiCorp Configuration Language, that works across all these different providers. The architecture has Terraform Core at the center, which reads your configuration files and plans changes. Below that sit provider plugins for AWS, GCP, Azure, and many others. Each provider plugin knows how to translate Terraform's unified syntax into API calls specific to that cloud platform.
+
+Let's walk through a basic Terraform file structure. At the top, you declare which version of Terraform you require and which providers you need. For example, you might require Terraform version 1.0 or higher and the AWS provider at version 5.0. Then you configure the provider, specifying things like which AWS region to use.
+
+Next, you define your resources. Each resource has a type and a name. For instance, you might define an AWS VPC resource named "main" with a CIDR block of 10.0.0.0 slash 16. You can enable DNS hostnames and add tags for organization, like environment tags or a "ManagedBy Terraform" tag to make it clear this resource is under Infrastructure as Code management.
+
+You can create multiple resources using loops. For example, to create subnets across multiple availability zones, you can use the count parameter with the length of your availability zones list. Each subnet gets created in a different zone with a different CIDR block.
+
+Finally, you define outputs, which are values that get exposed after Terraform runs. You might output the VPC ID so other parts of your infrastructure can reference it.
+
+Variables live in a separate file and define the inputs your configuration accepts. For instance, you might have an environment variable that must be one of "dev," "staging," or "prod," with validation to enforce this. You might have an AWS region variable with a default of "us-east-1." And you might have a list of availability zones with sensible defaults.
+
+The Terraform workflow has several distinct phases. First is initialization, where Terraform downloads provider plugins and configures your backend for storing state. Second is parsing your configuration files to build the desired state. Third is reading the current state by querying cloud provider APIs or reading the state file. Fourth is planning, where Terraform calculates the difference between desired and current state. And finally, applying, where it executes the plan to make the necessary changes.
+
+Here's what this looks like conceptually. During planning, Terraform iterates through all resources in your desired state. For each one, if it doesn't exist in the current state, Terraform adds a CREATE action to the plan. If it exists but has different configuration, it adds an UPDATE action. And for any resources in current state that aren't in desired state, it adds a DELETE action. After building the plan, it prints it out so you can review exactly what will happen.
+
+When you approve and apply the plan, Terraform executes each action in order, creating, updating, or deleting resources as needed. After all actions complete, it updates the state file to reflect the new reality.
+
+Let's talk about trade-offs. On the positive side, Terraform works across AWS, GCP, Azure, and dozens of other providers, giving you true multi-cloud capability. However, provider-specific quirks and limitations still exist. State management is powerful because it tracks what's deployed, but state file corruption can be catastrophic. The declarative approach makes configurations idempotent and predictable, but expressing complex conditional logic can be harder than with imperative scripts. And while Terraform has a huge module registry with thousands of pre-built components, module quality varies widely.
+
+When should you use Terraform? For most cloud infrastructure projects, especially when you're working across multiple clouds or multiple accounts within a single cloud. When should you NOT use Terraform? For Kubernetes resources, you're better off with Helm or Kustomize. For very dynamic infrastructure that changes constantly, and for application configuration that should live elsewhere.
+
+State Management
+
+Terraform needs to know what infrastructure exists in order to calculate differences and plan changes. Where does it store this information? In a state file called terraform.tfstate.
+
+This state file is JSON and contains the Terraform version, and a list of all resources with their attributes. For example, it might show that you have an AWS VPC resource named "main" with a specific ID and CIDR block. This file is what maps your Terraform resource names to actual cloud resource IDs.
+
+Local state files create serious problems in team environments. Imagine Developer A has a state file that maps aws instance dot web to instance ID i-111111. Developer B has a different state file that maps aws instance dot web to instance ID i-222222. When both developers run terraform apply, they create duplicate instances because their state files are out of sync. This is a disaster.
+
+The solution is remote state. You configure Terraform to store state in a shared location like an S3 bucket. The backend configuration specifies the bucket name, the key path within that bucket, the region, encryption settings, and critically, a DynamoDB table for locking.
+
+Remote state with locking works like this: The S3 bucket contains separate state files for different parts of your infrastructure. You might have production VPC state, production EKS state, and staging VPC state all in different paths. When Developer A starts working, they acquire a lock stored in the DynamoDB table. The lock record contains the lock ID, who owns it, when it was created. Developer B tries to work at the same time but sees the lock exists, so they wait. Only when Developer A finishes and releases the lock can Developer B proceed.
+
+State locking implementation works conceptually like this: When you want to acquire a lock, you try an atomic write to DynamoDB that only succeeds if the lock doesn't already exist. If that succeeds, you've acquired the lock. If it fails, the lock already exists, so you check if it's stale. A lock older than an hour might indicate someone's machine crashed while holding the lock, and you might force-release it after warning. If the lock is active and recent, you wait and retry periodically. If you can't acquire the lock within the timeout period, you give up and throw an error.
+
+When you're done with your work, you release the lock by deleting it from DynamoDB, but only if you're the owner. This prevents one person from accidentally releasing another person's lock.
+
+State file best practices are critical. First, never edit the state file manually. Always use terraform state commands if you need to make changes. Second, always use remote state for teams. Third, enable versioning on your S3 bucket so you can rollback if something goes wrong. Fourth, encrypt state at rest because it often contains sensitive data like database passwords. And fifth, separate state files by environment and component to limit blast radius.
+
+When should you use remote state? Always for production, and always for team projects. When can you skip it? Only for solo learning or throwaway experiments.
+
+Modules and Reusability
+
+Copy-pasting Terraform code across environments leads to drift and maintenance nightmares. Imagine you have 50 lines of VPC setup code in your dev directory, another 50 lines in staging that's slightly different, and another 50 lines in production that's different again. When you find a bug in the VPC setup, you have to fix it in three places. And if you forget one, you have a production incident.
+
+The solution is modules, which are reusable bundles of Terraform configuration. A module has a standard structure with a main.tf file containing resource definitions, a variables.tf file defining input variables, an outputs.tf file defining what values the module exposes, and a README explaining how to use it.
+
+Let's walk through a VPC module. It declares variables for environment name, CIDR block, and availability zones. Then it defines an AWS VPC resource using those variables, adding appropriate tags. It creates private subnets in each availability zone using the count parameter and the cidrsubnet function to automatically calculate subnet CIDR blocks. Finally, it exports outputs like the VPC ID and the list of private subnet IDs.
+
+To use this module, you simply reference it in your environment-specific configuration. In your production main.tf file, you declare a module named "vpc" with the source pointing to your module directory. You pass in the environment name "production," the CIDR block you want, and your list of availability zones. Then you can use other modules that depend on the VPC by referencing the first module's outputs. For example, an EKS module might take the VPC ID and subnet IDs from the VPC module.
+
+Modules compose together hierarchically. Your root module for production might use a VPC module, which provides outputs to an EKS module and an RDS module. Those might both use a shared security groups module. This composition allows you to build complex infrastructure from simple, well-tested pieces.
+
+Module trade-offs include these considerations: Reusability is excellent because you write once and use everywhere, but over-abstraction can obscure intent and make configurations hard to understand. Versioning lets you lock module versions for stability, but updating shared modules requires coordination across teams. You can test modules independently, which is great, but integration testing is still needed to ensure modules work together correctly. And while composability lets you build complex infrastructure from simple pieces, dependency chains can become complex and hard to reason about.
+
+When should you use modules? For repeated infrastructure patterns and multi-environment deployments. When should you NOT use modules? For one-off resources or infrastructure that's still in flux and changing rapidly.
+
+Pulumi: The Programming Language Approach
+
+Terraform's HCL is declarative but limited. Complex logic requires workarounds and clever tricks. You can't leverage your team's existing programming language expertise.
+
+Pulumi takes a different approach: write infrastructure code in real programming languages like Python, TypeScript, Go, or C Sharp.
+
+Here's what a Pulumi program in Python looks like. You import the pulumi library and the pulumi AWS package. Then you create resources using regular Python syntax. You instantiate an AWS VPC object with a name, CIDR block, DNS settings, and tags. You can use the pulumi.get_stack function to get the current environment name dynamically.
+
+For creating subnets, you use a regular Python for loop over your availability zones list. Each iteration creates a subnet object with an interpolated name, the VPC ID from the VPC object you created earlier, a calculated CIDR block using string formatting, and the availability zone. You append each subnet to a list so you can reference them later.
+
+Complex logic is just Python. You can write a function called should_create_nat_gateway that checks configuration values and environment names using if statements and boolean logic. Then use a normal Python if statement to conditionally create a NAT gateway. This is much cleaner than trying to express the same logic in HCL.
+
+At the end, you export outputs using pulumi.export, passing the VPC ID and a list comprehension over your subnets.
+
+Pulumi also supports advanced patterns like Component Resources, which are reusable abstractions similar to Terraform modules but defined as Python classes. You might create a PostgresDatabase class that extends pulumi.ComponentResource. Its constructor creates a security group, a subnet group, and an RDS instance, all with proper parent-child relationships. Then using it is as simple as instantiating the class and passing the necessary parameters.
+
+Pulumi uses state management similar to Terraform. It tracks deployed resources and stores metadata and outputs. The state can live in Pulumi Cloud, which is their SaaS offering, or in self-hosted backends like S3 or Azure Blob Storage.
+
+Let's compare Pulumi to Terraform across several dimensions. For language, Pulumi uses real programming languages while Terraform uses HCL, a domain-specific language. For handling complexity, Pulumi can handle complex logic easily using standard programming constructs, while Terraform is limited to HCL primitives. For learning curve, Pulumi lets you use existing language skills while Terraform requires learning HCL syntax. For ecosystem size, Pulumi's is smaller but growing, while Terraform has a massive module registry. For state management, both use similar approaches with Pulumi Cloud or S3 for Pulumi and S3, GCS, or Azure Blob for Terraform. For debugging, Pulumi works with standard debuggers from your IDE, while Terraform relies on terraform console and logging.
+
+When should you use Pulumi? When you have complex infrastructure logic that's hard to express declaratively, or when your team already uses Python or TypeScript extensively. When should you NOT use Pulumi? When you have simple infrastructure, or when you need maximum ecosystem and community support.
+
+GitOps Workflow
+
+In traditional workflows, infrastructure changes bypass code review and get applied directly from engineer laptops. There's no audit trail, no approval process, nothing. A developer runs terraform apply from their laptop, and changes go straight to AWS with no review and no audit.
+
+GitOps solves this by making Git the single source of truth. All infrastructure changes go through Git, and CI/CD systems apply changes automatically.
+
+The GitOps workflow looks like this: A developer creates a Git pull request with their infrastructure changes. The pull request goes through code review where teammates examine the proposed changes. After approval, the changes merge to the main branch. This triggers a CI/CD pipeline that automatically runs terraform apply. Every step is version controlled, reviewed, approved, and audited.
+
+The technical flow has your Git repository containing all your Terraform files and modules. When someone pushes to the main branch, it triggers a CI/CD pipeline for production that runs terraform apply and updates AWS. When someone opens a pull request, it triggers a different pipeline that only runs terraform plan and posts the results as a comment on the PR. This way, reviewers can see exactly what infrastructure changes will happen before approving.
+
+Here's what a GitHub Actions workflow looks like for this. The workflow triggers on pull requests that modify the terraform directory, and on pushes to main that modify the terraform directory. It has two jobs: terraform-plan and terraform-apply.
+
+The plan job runs on every pull request. It checks out the code, sets up Terraform with a specific version, runs terraform init to initialize providers, runs terraform fmt -check to ensure code formatting is consistent, runs terraform validate to check for syntax errors, and then runs terraform plan to generate the execution plan. It uses GitHub secrets for AWS credentials. Finally, if this is a pull request, it posts the plan output as a comment on the PR using the GitHub API.
+
+The apply job only runs when changes merge to main. It depends on the plan job completing successfully. It goes through similar setup steps, then runs terraform apply with auto-approve since the change has already been reviewed and approved. After completion, it sends a notification to Slack indicating success or failure.
+
+For Kubernetes environments, ArgoCD provides GitOps functionality. It watches your Git repository for Kubernetes manifest changes and automatically syncs cluster state to match Git. It also detects drift when someone makes manual changes with kubectl, alerting you and optionally reverting the changes to match Git.
+
+The drift detection logic works conceptually like this: Load all manifests from Git and get the current state from the cluster. Then compare them. For each resource in Git, check if it exists in the cluster. If it doesn't, mark it as missing. If it exists but has different configuration, mark it as modified. For resources in the cluster that aren't in Git, mark them as extra. Finally, reconcile by creating missing resources, updating modified resources to match Git, and optionally deleting extra resources if your policy allows pruning.
+
+When should you use GitOps? For production systems, for teams larger than three people, and when you have compliance requirements. When should you skip it? For local development and prototyping.
+
+Secrets Management
+
+Here's what you absolutely should NOT do: put passwords directly in your Terraform code. If you create a database resource with password equals "supersecret123" in your code file, that password ends up in Git history forever, in the Terraform state file in plain text, in CI/CD logs, and in the plan output posted as PR comments. This is a security disaster.
+
+There are several solutions, ranging from basic to enterprise-grade.
+
+The basic approach uses environment variables. You declare a variable for the database password marked as sensitive, then reference that variable in your resource. Before running Terraform, you export TF_VAR_db_password with the actual password value. Terraform picks it up from the environment. This keeps the secret out of Git but requires manual secret management.
+
+For production, use AWS Secrets Manager or similar services. You create a secret resource in Terraform, but you set the actual secret value through a variable that comes from a secure source, not from Git. Then other resources can reference the secret by reading it from Secrets Manager. The secret value itself never appears in your Terraform code.
+
+For enterprise environments, HashiCorp Vault provides centralized secret management with features like dynamic secrets, fine-grained access control, and audit logging. Your Terraform code reads secrets from Vault at runtime rather than storing them anywhere.
+
+State file encryption is also critical. When you configure your S3 backend, enable the encrypt parameter for server-side encryption. For additional security, specify a KMS key ID to encrypt the state file with a key you control. This protects sensitive data that might end up in state.
+
+When should you use each approach? Environment variables for development and simple cases. Secrets Manager for production AWS-native deployments. And Vault for multi-cloud environments, enterprise requirements, or when you need dynamic secrets.
+
+Blast Radius Control
+
+Imagine this nightmare scenario: One terraform destroy command destroys your entire production environment. The database with all its data, gone. Load balancers, gone. Auto-scaling groups, gone. Everything. Recovery time is unknown. Data loss is catastrophic.
+
+This is why blast radius control is critical. You need to limit how much damage a single command can do.
+
+The first strategy is separating state files. Instead of one giant state file for all of production, organize by component. Have a network directory for VPCs and subnets with its own backend configuration pointing to a production-network state file. Have a data directory for RDS and ElastiCache with its own state file. Have a compute directory for EKS and EC2 with its own state file.
+
+Now the blast radius is limited. Running terraform destroy in the network directory only affects networking resources. You can't accidentally destroy the database from the compute directory because they're in separate state files.
+
+The second strategy is workspaces, though these should be used with caution. You can create separate workspaces for production, staging, and dev, then switch between them. However, workspaces share the same state file with different namespaces, making them less safe than completely separate state files.
+
+The third strategy is resource targeting, which lets you apply or destroy specific resources. You can run terraform apply -target=aws_security_group.web to only modify that one security group. Or terraform destroy -target=aws_instance.temp_debug to remove a specific temporary instance. However, use this sparingly because it breaks the dependency graph and can lead to inconsistent state.
+
+The fourth strategy is lifecycle protections built into Terraform and cloud providers. You can set deletion_protection equals true on critical resources like production databases. You can add a lifecycle block with prevent_destroy equals true so Terraform refuses to destroy the resource. You can use ignore_changes to prevent Terraform from modifying certain attributes that might change outside Terraform.
+
+Protection layers stack up. The prevent_destroy lifecycle rule prevents Terraform from destroying a resource. The deletion_protection setting prevents the cloud provider from deleting it even if Terraform tries. State file locking prevents concurrent modifications. And RBAC, or Role-Based Access Control, prevents unauthorized users from running applies.
+
+When NOT to Use Infrastructure as Code
+
+Infrastructure as Code is powerful, but it's not appropriate for everything. Let's talk about when you should NOT use it.
+
+First, application configuration. Don't put feature flags or application settings in Terraform. If you create an SSM parameter for whether a new UI is enabled, changing that requires running terraform apply, which is way too heavyweight for application configuration. Better to use dedicated application config systems like LaunchDarkly, ConfigCat, or simple environment variables.
+
+Second, frequently changing resources. Don't try to manage thousands of short-lived containers with Terraform. If you're creating ECS task definitions that change every few minutes as users submit jobs, Terraform is the wrong tool. Let orchestrators like Kubernetes or ECS handle dynamic resources.
+
+Third, the secrets themselves. Don't store actual secret values in Infrastructure as Code. You can create the secret resource with Terraform, but populate the value manually or through a separate secret management tool, not in your Terraform code.
+
+Fourth, stateful data. Be extremely careful with databases and other stateful resources. If you set skip_final_snapshot equals true on a production database, one typo or accident could mean complete data loss. Use Infrastructure as Code for infrastructure provisioning, but rely on backup and restore processes for data protection.
+
+Comparison of Infrastructure as Code Tools
+
+Let's compare the major Infrastructure as Code tools across several dimensions.
+
+For language, Terraform uses HCL, Pulumi uses Python, TypeScript, or Go, CloudFormation uses JSON or YAML, and CDK uses TypeScript or Python.
+
+For cloud support, Terraform and Pulumi work across all major clouds. CloudFormation only works with AWS. CDK is primarily for AWS but has some support for other clouds.
+
+For state management, Terraform requires state stored in S3 or similar. Pulumi requires state in Pulumi Cloud or S3. CloudFormation is managed by AWS automatically. CDK uses CloudFormation under the hood.
+
+For learning curve, Terraform is medium difficulty, Pulumi is low if you already know the programming language, CloudFormation is high due to its verbosity and AWS-specific concepts, and CDK is medium.
+
+For ecosystem size, Terraform has a massive community and module registry. Pulumi's ecosystem is growing but smaller. CloudFormation is AWS native with comprehensive AWS coverage. CDK is AWS focused with TypeScript being the primary language.
+
+For open source status, Terraform is open source. Pulumi is open source but has paid features. CloudFormation is proprietary to AWS. And CDK is open source.
+
+For what each is best suited to: Terraform excels at multi-cloud and mature infrastructure. Pulumi is best for complex logic. CloudFormation is best for AWS-only simple deployments. And CDK is best for AWS deployments with TypeScript teams.
+
+Interview Checklist
+
+Here are the key concepts you should be able to explain for a Staff-plus interview.
+
+First, explain declarative versus imperative infrastructure and why declarative is generally preferred.
+
+Second, describe the Terraform workflow including initialization, planning, and applying changes.
+
+Third, explain state management and locking, including why they're necessary and how they work.
+
+Fourth, design a module structure for reusability that balances abstraction with clarity.
+
+Fifth, compare Terraform versus Pulumi versus CloudFormation, understanding the trade-offs of each.
+
+Sixth, implement a GitOps workflow for infrastructure changes that includes code review and audit trails.
+
+Seventh, handle secrets securely, understanding multiple approaches and when to use each.
+
+Eighth, control blast radius with separate state files and lifecycle protections.
+
+And ninth, know when NOT to use Infrastructure as Code and what alternatives exist.
+
+Staff-Plus Insights
+
+Let me share some hard-won wisdom from operating Infrastructure as Code at scale.
+
+The state file is the source of truth, and corrupted state is a disaster. Always enable S3 versioning on your state bucket so you can rollback if something goes wrong. If you somehow lose your state file, you can use terraform import to reconstruct it by importing existing resources one by one, but this is painful and time-consuming. Avoid it by treating state files as precious. And never edit state manually. Always use terraform state mv to move resources or terraform state rm to remove resources from state.
+
+Module versioning prevents surprises. When you reference a module from the registry, pin the version using the version parameter. Use tilde greater than 5.0 to pin the major version but allow minor and patch updates. Without version pinning, a module author's breaking change can break your infrastructure unexpectedly. But pinning too strictly means you miss security updates. The goldilocks approach is pinning the major version and reviewing updates in staging before promoting to production.
+
+Plan review is just as important as code review. Always read the plan output carefully. When you see a tilde indicating a resource will be updated in place, pay special attention. For example, if you see a security group ingress rule being removed and replaced, check what's changing. If the old rule allowed access from 10.0.0.0 slash 16, which is your private subnet, and the new rule allows access from 0.0.0.0 slash 0, which is the entire internet, that's a critical security issue that must be caught before applying.
+
+Drift happens in the real world. The cause is often an engineer manually changing something via the AWS Console, maybe to debug a production issue. The result is Terraform state gets out of sync with reality. You have options for fixing this. You can run terraform refresh to update the state to match reality, accepting the manual change. You can run terraform apply to revert the manual change and enforce what's in your code. Or you can import the drift into Terraform if you want to keep the manual change. The best long-term solution is using GitOps to prevent manual changes in the first place.
+
+Organize by rate of change. Structure your Terraform code with foundation resources like VPCs and subnets that rarely change in one directory with its own state file. Put data resources like databases that occasionally change in another directory. Put compute resources like EKS clusters and instances that change more often in another directory. And put application-specific resources that change frequently in yet another directory. This organization minimizes blast radius and reduces plan noise.
+
+Count versus for_each is an important choice with significant implications. Using count creates resources indexed by numbers like web bracket 0, web bracket 1, web bracket 2. The problem is if you delete web bracket 1, web bracket 2 becomes web bracket 1, triggering a replacement of that resource, which is probably not what you want. Using for_each instead creates resources indexed by strings like web bracket "web-1", web bracket "web-2", web bracket "web-3". Now deleting web-2 only affects that specific resource, with no cascading changes.
+
+Testing infrastructure code is important but often neglected. Unit tests validate HCL syntax and check outputs using terraform validate. Integration tests deploy to a test account and verify resources actually exist. Contract tests ensure modules meet their expected interface. Useful tools include Terratest for Go and pytest for Pulumi. A real integration test might run terraform init and apply in a test fixture directory, capture the outputs using terraform output -json, assert that outputs match expectations like having three private subnet IDs and the correct VPC CIDR, then clean up by running terraform destroy. This ensures your modules work correctly in real cloud environments, not just in theory.
+

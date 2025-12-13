@@ -1,0 +1,141 @@
+Chapter 5: Consensus and Coordination
+
+The Split-Brain Problem
+
+Imagine a database cluster with three nodes: A, B, and C. Node A is the leader, while nodes B and C are followers. Everything is running smoothly until suddenly, a network partition occurs. The network connection between node A and the other two nodes is severed.
+
+Without a consensus algorithm, here's what happens: Node A, isolated and alone, continues operating as the leader. Meanwhile, nodes B and C can't reach A anymore. After waiting for a timeout period, they assume A has failed and elect B as the new leader. Now you have two leaders accepting writes - node A on one side of the partition, and node B on the other side. Data starts to diverge catastrophically. When the network partition eventually heals and the nodes can communicate again, you face a terrible question: which data wins? This nightmare scenario is called split-brain, and consensus algorithms were specifically designed to prevent it.
+
+Why Consensus Matters
+
+Consensus is fundamental to building reliable distributed systems. It enables five critical capabilities: First, leader election, ensuring that exactly one leader exists at any given time. Second, atomic broadcast, which delivers messages in the same order to all nodes. Third, distributed locks that provide exclusive access to resources. Fourth, configuration management to agree on cluster membership. And fifth, replicated state machines that keep replicas perfectly synchronized. Without consensus, you simply cannot build reliable distributed systems.
+
+The Raft Consensus Algorithm
+
+Raft was specifically designed for understandability, making it easier to implement correctly compared to older algorithms like Paxos. It's used by many production systems including etcd, Consul, CockroachDB, and TiKV.
+
+Three Roles
+
+Raft defines three distinct roles for nodes. The leader handles all client requests and replicates data to followers. Followers are passive - they respond to the leader's requests but don't initiate anything themselves. During an election, a node becomes a candidate, requesting votes from other nodes to become the new leader. Think of it as a hierarchy where the leader sits at the top, communicating with multiple followers below it.
+
+State Machine
+
+Understanding how nodes transition between these roles is crucial. All nodes start as followers. If a follower doesn't receive a heartbeat from the leader within the election timeout period, it transitions to the candidate state and begins requesting votes. A candidate can experience three outcomes: it can discover that a current leader already exists and return to follower state; it can win the election by receiving a majority of votes and become the leader; or in the case of a split vote or tie, it will retry the election. Once a node becomes leader, it stays in that role until it discovers a higher term, which indicates that a newer leader exists, at which point it steps down to follower state.
+
+Terms: Logical Time
+
+Terms are Raft's way of implementing a logical clock. They increase monotonically and never decrease. Let me walk you through an example. In term 1, node A is the leader. It sends heartbeats with term equals 1, and everyone agrees that A is the leader. Then a network partition happens. In term 2, node A becomes unreachable. Node B starts an election and increments its term to 2. Node C votes for B because term 2 is greater than term 1, which makes it valid. B becomes the leader with term 2. In term 3, node A rejoins the network. When A receives a message with term 2, it sees that term 2 is greater than its own term 1. A realizes it's stale and immediately steps down to follower state, updating its term to 2. The key rule is simple: the node with the higher term wins. Operations from lower terms are rejected.
+
+Leader Election in Detail
+
+The Process
+
+Let's walk through the complete leader election process step by step. Initially, all nodes start as followers. Nodes A, B, and C all have term equals 0. In step 1, A's election timeout fires. This timeout is randomized between 150 and 300 milliseconds. Since A hasn't heard from any leader, it decides to try becoming the leader itself. In step 2, A becomes a candidate. It increments its term to 1, votes for itself, and sends a RequestVote message with term equals 1 and candidateId equals A to both B and C. In step 3, voting occurs. When B receives the RequestVote message, it checks two things: is term 1 greater than my current term 0? Yes. Have I already voted in term 1? No. So B grants its vote to A and updates its own term to 1. Node C goes through the same logic and also grants its vote to A. In step 4, the majority wins. Node A receives two votes from B and C, plus its own self-vote, giving it 3 votes. Three out of three nodes is a majority, so A becomes the leader. A immediately sends heartbeats to B and C. When B and C receive the heartbeat from leader A, they stay in follower state.
+
+Why Randomized Timeouts?
+
+You might wonder why the election timeout is randomized. Here's the problem without randomization: if all nodes have the same timeout of 200 milliseconds, they all timeout simultaneously. They all become candidates at the same time, they all vote for themselves, resulting in a three-way split with no winner. Then they all timeout again and repeat this cycle forever. The solution is randomization. If node A has a timeout of 180 milliseconds, B has 250 milliseconds, and C has 230 milliseconds, then A fires first and becomes a candidate before the others. B and C haven't timed out yet, so they're still followers and can grant their votes to A. A wins the election before B or C even try. The typical range is 150 to 300 milliseconds, which should be significantly larger than the heartbeat interval of around 50 milliseconds.
+
+Log Replication
+
+Once a leader is elected, it handles all write operations. Let me walk through an example. A client sends a command: SET X equals 5. The leader's log contains entries indexed 1 through 4, representing commands A, B, C, and the new command X. Entry 4 is uncommitted because it's new. The leader sends an AppendEntries message to all followers. This message includes the current term, the previous log index of 3, the previous log term of 1, and the new entry with index 4, term 1, and command SET X equals 5. Before this message, follower B's log has entries 1, 2, and 3. When follower B receives the AppendEntries message, it checks: do I have entry 3 with term 1? Yes, I do. So it appends entry 4 to its log and sends an acknowledgment to the leader. After this, follower B's log contains entries 1, 2, 3, and 4. When the leader receives acknowledgments from both B and C, it has a majority. The leader marks entry 4 as committed, applies it to the state machine, returns success to the client, and in the next heartbeat, tells followers to commit up to entry 4.
+
+The Commitment Rule
+
+An entry is considered committed when it's stored on a majority of nodes. For a 5-node cluster, you need 3 nodes. For a 3-node cluster, you need 2 nodes. Why does majority matter? Any two majorities must overlap by at least one node. Since future leader elections require a majority, any future leader will have been part of a majority that contains the committed entries. Therefore, the future leader will definitely have all committed entries.
+
+Raft Safety Guarantees
+
+Election Safety
+
+The first safety guarantee is that at most one leader exists per term. Here's the proof: winning an election requires a majority of votes. Each node votes at most once per term. A majority is more than half the nodes. You can't have two different majorities in the same term because they would overlap. Therefore, you can have at most one winner per term.
+
+Leader Completeness
+
+The second guarantee is that if an entry is committed in term T, it will be present in all leaders for any term greater than T. Here's why: a committed entry is stored on a majority of nodes. A new leader is elected by getting votes from a majority. Since majorities overlap, at least one voter has the committed entry. Raft only elects candidates with the most up-to-date log, so the new leader must have the committed entry.
+
+State Machine Safety
+
+The third guarantee is that all nodes apply the same commands in the same order. This follows because committed entries never change due to leader completeness. All nodes eventually receive all committed entries. When you apply the same sequence of commands, you get the same final state.
+
+Cluster Membership
+
+Why Odd Numbers?
+
+Let's examine why consensus clusters should have an odd number of nodes. Consider a 5-node cluster. The majority is 3, so you can tolerate 5 minus 3 equals 2 failures. Now consider a 4-node cluster. The majority is 3 because you need more than half of 4. You can tolerate 4 minus 3 equals only 1 failure. Wait, 4 nodes tolerates fewer failures than 5 nodes? Yes! Adding an even node doesn't help. With 3 nodes, the majority is 2, and you can tolerate 1 failure. With 4 nodes, the majority is 3, and you can still only tolerate 1 failure - the same as before! With 5 nodes, the majority is 3, but now you can tolerate 2 failures. The optimal cluster sizes are: 3 nodes to tolerate 1 failure, 5 nodes to tolerate 2 failures, and 7 nodes to tolerate 3 failures.
+
+Cluster Reconfiguration: The Danger
+
+Changing cluster membership is dangerous. Here's the bad approach of directly switching. With the old configuration of nodes A, B, C, the majority is 2. With the new configuration of nodes A, B, C, D, E, the majority is 3. During the transition when both configurations are active, nodes A and B could elect a leader using the old configuration requiring only 2 of 3 votes. Simultaneously, nodes C, D, and E could elect a different leader using the new configuration requiring 3 of 5 votes. Now you have two leaders - the split-brain problem again!
+
+Joint Consensus Solution
+
+The solution is joint consensus, which proceeds in steps. In step 1, the leader proposes a configuration called C old-new, where operations need a majority from both the old and new configurations. In step 2, this configuration is replicated to a majority. You need both 2 of 3 from the old configuration and 3 of 5 from the new configuration. When both agree, it's committed. In step 3, the leader proposes the final C new configuration where only the new configuration matters. In step 4, C new is replicated to the new majority and committed when 3 of 5 nodes have it. In step 5, nodes not in C new are removed. During joint consensus, you can't have two leaders because any leader needs majorities from both configurations.
+
+ZooKeeper
+
+ZooKeeper is a coordination service built on ZAB, which stands for ZooKeeper Atomic Broadcast, a consensus protocol similar to Raft.
+
+Data Model
+
+ZooKeeper organizes data in a hierarchical namespace, similar to a filesystem. At the root, you might have a services directory containing subdirectories for api-server and database. Under api-server, you'd have instance-1 storing "host1:8080" and instance-2 storing "host2:8080". Under database, you'd have a leader node storing "host3:5432". You might also have a locks directory with a job-scheduler node storing "worker-7", and a config directory with feature-flags storing JSON configuration data.
+
+Node Types
+
+ZooKeeper has three types of nodes. Persistent nodes survive client disconnection and require explicit deletion. For example, you could create a node at /config/db-url containing "postgres://localhost:5432", and it survives forever until you explicitly delete it. Ephemeral nodes are automatically deleted when the client session ends. If you create a node at /services/api/instance-1 as ephemeral, and the client dies or disconnects, the node disappears automatically. This is perfect for service discovery! Sequential nodes have an automatically appended incrementing counter. When you create a node at /locks/job- as sequential, ZooKeeper creates /locks/job-0000000001. The next one becomes /locks/job-0000000002. This is perfect for implementing distributed locks and queues.
+
+Watches
+
+Watches provide one-time notifications when nodes change. You define a callback function that gets triggered when a node changes, printing information about the event type and path. To enable continuous monitoring, you re-register the watch inside the callback. When you initially call get on a path like /config/feature-flags with the watch parameter, the callback fires once when the node changes.
+
+Common ZooKeeper Patterns
+
+Service Discovery
+
+For service discovery, a service registers itself using an ephemeral node that auto-cleans up when the service dies. The register service function creates a node at a path like /services/service-name/host:port as ephemeral. Clients discover services by calling get children on the /services/service-name path, which returns a list like "host1:8080" and "host2:8080". If host1 crashes, its ephemeral node disappears automatically, so the next discover services call won't include it.
+
+Leader Election
+
+For leader election, you participate by creating a sequential ephemeral node. For example, creating a node at /election/candidate- with both ephemeral and sequence flags creates something like /election/candidate-0000000042. Then you enter a loop where you get all candidates sorted by their sequence numbers. If your node name matches the first candidate in the sorted list, you're the leader! If not, you watch the candidate just before you in the list and wait for them to die before checking again. You might wonder why watch your predecessor instead of the leader. If 100 nodes all watch the leader, when the leader dies, all 100 watches trigger simultaneously, creating a thundering herd problem. If each node watches only its predecessor, leader death triggers just one watch, leading to graceful succession.
+
+Distributed Lock
+
+Implementing a distributed lock uses the same pattern as leader election. You create an ephemeral sequential node at a path like /locks/lock-. In a loop, you get all children sorted. If your node name is first in the sorted list, you have the lock. Otherwise, you wait for your predecessor to be deleted. To release the lock, you simply delete your node, or just disconnect - ephemeral nodes auto-delete when the session ends.
+
+Comparison: Raft vs Paxos vs ZAB
+
+Let's compare the three major consensus algorithms. Regarding understandability, Raft is high because it was specifically designed for it, Paxos is low and notoriously complex, while ZAB is medium difficulty. All three are leader-based systems - Raft uses a single leader, Multi-Paxos has a leader, and ZAB uses a single leader. For reconfiguration, Raft uses joint consensus, Paxos is complex, and ZAB supports dynamic membership. Looking at real-world usage, Raft is used by etcd, Consul, and TiKV. Paxos is used by Spanner and Chubby. ZAB powers ZooKeeper. The learning curve for Raft takes days, Paxos takes weeks or months, and ZAB takes days.
+
+When to Use Each
+
+For Raft implementations like etcd or Consul, use them for configuration storage, service discovery, leader election, and small critical data typically under 1 gigabyte. For ZooKeeper, use it for coordination between services, distributed locks, barrier synchronization, and when you need a mature, battle-tested ecosystem. For Paxos implementations like Spanner, use them for global-scale databases when you need Google-level engineering. Note that Paxos is rarely implemented directly.
+
+Consensus Limitations
+
+Performance Costs
+
+Consensus comes with significant performance costs. For latency, the minimum is one round-trip time for the leader to get a majority acknowledgment. If you're doing cross-datacenter replication, say between New York and London, you're looking at 70 milliseconds round-trip time. Every write incurs at least 70 milliseconds of latency. Compare that to a single-node write which takes less than 1 millisecond. For throughput, all writes must go through one leader, making the leader a bottleneck. Typical consensus systems handle 10,000 to 50,000 writes per second. Compare that to a sharded system that can handle millions of writes per second.
+
+Availability Constraints
+
+You need a majority of nodes online to make progress. In a 3-node cluster, you need 2 online. In a 5-node cluster, you need 3 online. During leader election, no writes can be processed. Elections typically take 150 to 500 milliseconds.
+
+When NOT to Use Consensus
+
+For some scenarios, consensus is the wrong choice. For read-heavy workloads, use eventual consistency with read replicas instead. For cross-region writes, use CRDTs or last-write-wins. For high-throughput counters, use CRDTs like G-Counter. For cache coordination, use TTL-based expiration. For fire-and-forget events, use a message queue.
+
+Key Concepts Checklist
+
+Make sure you can explain why consensus is needed to avoid split-brain. Describe the leader election mechanism in detail. Discuss log replication and the commitment rule. Explain majority quorum math and why odd numbers of nodes are optimal. Know when not to use consensus. Mention specific implementations like Raft in etcd and ZAB in ZooKeeper.
+
+Practical Insights
+
+Here are some hard-won lessons from production systems. First, consensus is a building block, not a complete solution. Don't use ZooKeeper for everything - it's designed for coordination, not general data storage. Keep your consensus cluster small, typically 3 to 5 nodes.
+
+Second, network partitions are rare but devastating when they occur. Test partition scenarios explicitly. Know your system's behavior during a partition. Have runbooks prepared for split-brain recovery.
+
+Third, when choosing between etcd and ZooKeeper, consider that etcd has a simpler API, uses gRPC, and is Kubernetes native. ZooKeeper has more features like watches and sequences, plus an older, more mature ecosystem. For new projects, etcd is usually the choice.
+
+Finally, remember that Raft implementations vary in quality. etcd's Raft implementation is battle-tested and reliable. Implementing Raft yourself from scratch is surprisingly hard to get right, with many subtle edge cases. Use existing implementations when possible rather than rolling your own.
+
+This concludes Chapter 5 on Consensus and Coordination.

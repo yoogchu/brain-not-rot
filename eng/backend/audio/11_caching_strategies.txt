@@ -1,0 +1,195 @@
+Chapter 11: Caching Strategies
+
+The Caching Imperative
+
+Let's start by looking at a real-world case study from Facebook's TAO system. Facebook's social graph contains billions of nodes and trillions of edges representing connections between users, posts, comments, and other entities. In this massive system, an incredible 99.8% of queries are served directly from cache. When there's a cache hit, the response time is about half a millisecond. But when there's a cache miss, the response time jumps to 10 milliseconds, which is 20 times slower. Without caching, Facebook's entire system would collapse under the load. This illustrates that caching isn't just an optimization technique. At scale, it's a survival strategy.
+
+Let's look at the numbers to understand why caching is so critical. A typical database query takes anywhere from 10 to 100 milliseconds. A Redis cache lookup, on the other hand, takes only 0.1 to 1 millisecond. And accessing data from local memory takes just 0.0001 milliseconds. This means caching can give you a speed improvement of 100 to 1000 times compared to hitting the database directly.
+
+Cache Patterns
+
+Now let's explore the different caching patterns you can use in your systems. Each pattern has specific use cases, advantages, and trade-offs.
+
+Cache-Aside, also known as Lazy Loading
+
+In the cache-aside pattern, the application manages the cache explicitly. Here's how it works. When you need to get user data, you first check the cache using a key like "user" followed by the user ID. If the data is cached, you get a cache hit and can return it immediately. This is the fast path. If the data isn't in the cache, you get a cache miss. In that case, you query the database with a SELECT statement to get the user data. Once you have the data from the database, you populate the cache for next time by setting the cache key with the data and a time-to-live of, say, 3600 seconds, which is 1 hour. Finally, you return the user data.
+
+The flow works like this: A request comes in, you check the cache. If it's a hit, you return the cached data immediately. If it's a miss, you query the database, store the result in the cache, and then return the data.
+
+The advantages of cache-aside are that it's simple to understand and implement. It only caches data that's actually requested, so you're not wasting cache space on data nobody needs. And if the cache fails, the system doesn't break because you can always fall back to the database.
+
+The disadvantages are that the first request is always slow because it's always a cache miss. The cache and database can become inconsistent if data changes. And the application must handle all the cache logic itself.
+
+This pattern is best for read-heavy workloads and data that's expensive to compute or retrieve.
+
+Write-Through
+
+In the write-through pattern, you write to both the cache and the database together. When updating a user, you write to the database with an UPDATE statement, and then immediately write the same data to the cache with the cache key.
+
+The flow is straightforward: A write request comes in, you write to the database, then write to the cache, and finally return success.
+
+The advantages are that the cache is always consistent with the database. You never get stale reads. And subsequent reads are fast because the data is already in the cache.
+
+The disadvantages are that every write has cache overhead, which increases write latency. And you may end up caching data that's never actually read.
+
+This pattern is best for data that's read frequently after being written.
+
+Write-Behind, also known as Write-Back
+
+The write-behind pattern is more aggressive. You write to the cache immediately and then asynchronously write to the database later. When updating a user, you write to the cache only, which is immediate. Then you queue an asynchronous write to the database with the operation details. You return success immediately without waiting for the database write.
+
+A background worker continuously processes the write queue. It dequeues batches of, say, 100 operations and performs an efficient bulk write to the database.
+
+The flow works like this: A write request comes in, you write to the cache, queue a database write, and return success immediately. Meanwhile, a background worker picks up queued writes and batch writes them to the database.
+
+The advantages are extremely fast writes because you're only writing to the cache and a queue. You can batch database writes, which is much more efficient. And the system can absorb write spikes without overwhelming the database.
+
+The disadvantages are significant. There's a risk of data loss if the cache fails before the database write completes. It's complex to implement correctly. And the system is eventually consistent, not immediately consistent.
+
+This pattern is best for high write throughput scenarios and analytics or logging where some data loss is acceptable.
+
+Read-Through
+
+In the read-through pattern, the cache handles database reads transparently. From the application's perspective, the code is very simple. You just call cache.get with the user key, and the cache handles cache misses internally.
+
+The cache implementation might look like this: When getting a value, you check the cache. If the value is null, the cache itself handles the database read, loads the data from the database, sets it in the cache with a time-to-live, and then returns the value.
+
+The advantages are simpler application code, consistent caching logic across the application, and it's easy to add caching to existing systems.
+
+The disadvantages are that it requires cache infrastructure that supports this pattern, and you have less control over caching behavior.
+
+Refresh-Ahead
+
+The refresh-ahead pattern proactively refreshes the cache before expiration. When getting a value, you retrieve it along with the remaining time-to-live. If the remaining TTL is below a refresh threshold, you trigger an asynchronous refresh in the background without blocking the request. The fresh value is loaded from the database and set in the cache.
+
+The advantages are that you eliminate cache miss latency for frequently accessed keys, and you get predictable performance.
+
+The disadvantages are increased complexity. You may refresh data that won't be requested again. And the background refresh adds load to your system.
+
+This pattern is best for hot data with predictable access patterns.
+
+Cache Stampede Prevention
+
+Let me explain a critical problem called the cache stampede, also known as the thundering herd problem.
+
+Imagine a popular cache key expires at time equals 100. At time 100.001, request 1 arrives, gets a cache miss, and queries the database. At time 100.002, request 2 arrives, also gets a cache miss, and also queries the database. At time 100.003, request 3 does the same. This continues until at time 100.100, you have request 1000 also querying the database. You now have 1000 simultaneous database queries for the exact same data. The database gets overwhelmed and you experience a cascading failure.
+
+Let me describe four solutions to this problem.
+
+Solution 1: Locking with a Mutex
+
+Only one request fetches the data while others wait. When getting a value with a lock, you first try to get it from the cache. If it's there, return it. If not, you try to acquire a lock using a lock key. If you successfully acquire the lock, you query the database, set the cache, return the value, and then release the lock. If someone else has the lock, you wait briefly and retry.
+
+The advantage is that you only have one database query. The disadvantage is that it adds latency for waiting requests and requires lock management.
+
+Solution 2: Probabilistic Early Expiration
+
+This approach refreshes the cache before it expires, but probabilistically. When getting a value, you retrieve it along with metadata about the TTL. If the value is null, you fetch from the database and cache it. Otherwise, you calculate a probability based on how close to expiration you are. As the TTL decreases, the probability of triggering a refresh increases. If the random check succeeds, you refresh in the background without blocking.
+
+As expiration approaches, more requests will trigger refresh attempts. The first one to finish repopulates the cache for everyone else.
+
+Solution 3: Background Refresh
+
+With this approach, you never let the cache expire. Instead, you refresh it proactively. A background job runs every minute, gets a list of frequently accessed hot keys, and for each key, checks the remaining TTL. If the TTL is less than 5 minutes, it queries the database and refreshes the cache with a new TTL of 1 hour.
+
+The advantage is that a stampede is impossible. The disadvantage is that you need infrastructure to track hot keys.
+
+Solution 4: Stale-While-Revalidate
+
+This approach serves stale data while refreshing in the background. When getting a value, you retrieve it along with a flag indicating if it's stale. If the value exists and is stale, you serve the stale data but trigger an asynchronous refresh. If there's no data at all, you must wait for a fresh fetch.
+
+The advantage is that requests are always fast because you serve stale data while refreshing. The disadvantage is that you may serve stale data briefly.
+
+Cache Invalidation Strategies
+
+Now let's talk about how to keep your cache from serving stale data.
+
+Time-Based with TTL
+
+The simplest approach is to set a time-to-live when caching data. For example, you might cache user data with a TTL of 3600 seconds, meaning it expires in 1 hour. This is simple, but data can be stale for up to the entire TTL duration.
+
+Event-Based Invalidation
+
+With event-based invalidation, you invalidate the cache when data changes. When updating a user, you first update the database, then immediately delete the cache key. Alternatively, you can publish an event when data changes. The cache service subscribes to these events and invalidates the appropriate cache keys when it receives an event.
+
+Version-Based Invalidation
+
+With version-based invalidation, you include a version number in the cache key. When getting a user, you first get the current version from the database. Then you construct a cache key that includes the version, like "user:123:v5". You check the cache with this versioned key. If it's cached, return it. If not, get the user from the database and cache it with the versioned key using a long TTL, which is safe because the key includes the version.
+
+When updating a user, you update the database and increment the user's version number. The old cache key with the old version is now orphaned and will naturally expire. No explicit invalidation is needed.
+
+Cache Data Structures
+
+Let's explore the different data structures you can use in a cache like Redis.
+
+Simple Key-Value
+
+The simplest structure is key-value. You set a key like "user:123" with a value containing the user data. Later, you get the user by retrieving that key.
+
+Hash for Partial Updates
+
+A hash lets you store structured data with multiple fields. You can set individual fields of a user hash, like setting the name field to "Alice" and the email field to "alice@example.com". Later, you can update just a single field, like the email, without fetching the entire object. You can get a single field, or get all fields at once.
+
+Sorted Set for Leaderboards and Feeds
+
+A sorted set maintains items with scores in sorted order. You can add player scores to a leaderboard, get the top 10 players with highest scores, and get a specific player's rank.
+
+List for Queues and Recent Items
+
+A list maintains ordered sequences. You can push items to the front of a list to track recent views. You can trim the list to keep only the last 100 items. And you can retrieve the most recent 10 items.
+
+Multi-Level Caching
+
+Many systems use multiple cache levels for optimal performance. At the application level, you have L1, which is an in-memory cache using libraries like HashMap, Guava, or Caffeine. This has extremely low latency of 0.001 milliseconds but limited size, typically 100 megabytes to 1 gigabyte.
+
+Below that is L2, a distributed cache like Redis. This has slightly higher latency of 0.5 to 1 millisecond but much larger capacity of 10 to 100 gigabytes.
+
+Finally, at the bottom is the database with latency of 10 to 100 milliseconds.
+
+When getting user data, you first check the L1 local cache. If found, return it immediately. If not found, check Redis at L2. If found there, populate your L1 cache with a short TTL of 60 seconds and return the data. If still not found, query the database at L3, populate both Redis and local cache, and return the data.
+
+The main challenge with L1 caching is cache coherence across instances. Imagine Instance A has user 123 cached locally with the name "Alice". Instance B updates user 123 to "Alicia", invalidates Redis and its own L1 cache. But Instance A still has the stale data in its L1 cache.
+
+Solutions include using a short L1 TTL like 60 seconds, using pub-sub for invalidation where Redis publishes invalidation events and all instances subscribe, or simply accepting some staleness depending on your use case.
+
+Cache Sizing and Eviction
+
+Let's talk about eviction policies. These determine which items get removed when the cache is full.
+
+LRU, or Least Recently Used, evicts the item that was accessed longest ago. This is a good general-purpose policy.
+
+LFU, or Least Frequently Used, evicts the item that has been accessed least often overall. This works well when popularity is stable.
+
+FIFO, or First In First Out, evicts the oldest item. This is simple and predictable.
+
+Random eviction picks a random item to evict. This works when access patterns are unknown.
+
+TTL-based eviction removes expired items based on their time-to-live. This is good for time-sensitive data.
+
+For memory estimation, consider this example: Each user object is about 500 bytes. Caching 1 million users requires about 500 megabytes. Caching 10 million users requires about 5 gigabytes. With Redis overhead of about 30 to 50%, 10 million users in Redis needs about 7 gigabytes.
+
+Hit rate optimization is crucial. Imagine your current cache has a 90% hit rate, meaning 10% of requests miss the cache. If you're handling 1000 queries per second, your database handles 100 queries per second from the 10% miss rate.
+
+If you improve to a 99% hit rate, your database only handles 10 queries per second, which is a 10x reduction.
+
+How do you improve hit rate? First, increase cache size so more items fit. Second, use a better eviction policy. Third, use longer TTLs. Fourth, implement cache warming to pre-populate the cache. And fifth, implement prefetching for predictable access patterns.
+
+Key Concepts Checklist
+
+Let me summarize the key concepts you should understand. First, choose the appropriate cache pattern, whether that's cache-aside, write-through, write-behind, read-through, or refresh-ahead. Second, address your cache invalidation strategy using time-based, event-based, or version-based approaches. Third, handle cache stampede using techniques like locking, probabilistic refresh, background refresh, or stale-while-revalidate. Fourth, consider multi-level caching with both local and distributed caches. Fifth, plan for cache failures with fallback to the database. Sixth, size the cache appropriately based on your data and access patterns. And seventh, select the right eviction policy for your workload.
+
+Practical Insights
+
+Let me share some practical insights from real-world experience.
+
+First, think of cache as a contract. What's the maximum staleness your product can tolerate? Document this for your team so everyone has clear expectations.
+
+Second, hit rate is the metric that matters. Instrument your cache to track hit and miss rates. Set up alerts when the hit rate drops. And investigate cache eviction patterns to understand what's being removed.
+
+Third, implement cache warming. Pre-populate the cache before traffic hits it. This is essential for deployments and failovers to avoid a stampede of cache misses.
+
+Fourth, don't cache everything. Focus on caching hot data. Typically, 90% of requests are for just 10% of your data. Long-tail data might not be worth caching. Calculate the cost of a cache miss versus the cost of cache storage for each type of data.
+
+Finally, when choosing between Redis and Memcached, consider this: Redis offers rich data structures, persistence, and pub-sub capabilities. Memcached is simpler, multi-threaded, and focused purely on caching. Most teams choose Redis for its flexibility and feature set.
+
+This concludes Chapter 11 on Caching Strategies.

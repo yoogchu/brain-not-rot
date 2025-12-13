@@ -1,0 +1,257 @@
+Chapter 21: Observability - Metrics, Logs, and Traces
+
+Why Observability?
+
+Imagine this scenario. It's 3 AM and you receive an alert: "Payment service latency greater than 5 seconds." Without proper observability, you're left in the dark asking questions like: Which service is actually slow? What changed recently? How many users are affected? Is the problem getting worse? You have no answers, no visibility.
+
+But with observability in place, the story is completely different. Your metrics tell you that the 95th percentile latency spiked at exactly 2:47 AM. Your traces show that slow requests are spending 4.8 seconds in a database call. Your logs reveal the error message: "Connection timeout to payments database replica 3." Within 5 minutes, you've identified the root cause: a database replica failed over. This is the power of observability.
+
+The Three Pillars
+
+Observability rests on three fundamental pillars: metrics, logs, and traces. Think of these as three different lenses through which you view your system's behavior.
+
+Metrics give you aggregated numbers. They answer questions like "What's broken?" and "How bad is it?" Metrics include things like request rate, error rate, 99th percentile latency, and CPU and memory usage.
+
+Logs are discrete events that provide detailed context. They answer the question "Why is it broken?" Logs contain error details, debug information, user actions, and audit trails.
+
+Traces show you the flow of requests across services. They answer the question "Where in the request flow is the problem?" Traces reveal how service A calls service B, the latency at each hop, identify bottlenecks, and pinpoint where errors occur.
+
+All three pillars work together to give you complete visibility into your systems.
+
+Metrics
+
+Let's start with metrics. There are two fundamental frameworks for thinking about metrics: the RED method and the USE method.
+
+The RED Method for Request-Focused Monitoring
+
+The RED method is perfect for services, APIs, and microservices. It focuses on three key dimensions.
+
+First is Rate: how many requests per second is your service handling?
+
+Second is Errors: how many errors per second are you seeing?
+
+Third is Duration: what does the latency distribution look like? This includes the 50th percentile, 95th percentile, and 99th percentile latencies.
+
+The USE Method for Resource-Focused Monitoring
+
+The USE method is ideal for infrastructure, databases, and queues. It also focuses on three dimensions.
+
+First is Utilization: what percentage of time is the resource busy?
+
+Second is Saturation: how deep is the queue or backlog?
+
+Third is Errors: what's the error count?
+
+Metric Types
+
+There are three fundamental types of metrics you need to understand.
+
+First is the Counter. A counter is a monotonically increasing value that only goes up. For example, you might track total HTTP requests with separate counters for different methods and status codes. You'd have one counter for GET requests that returned status 200, and another for GET requests that returned status 500. Counters are perfect for tracking request counts, error counts, and bytes sent. When analyzing counters, you typically calculate the rate of change to get values like requests per second.
+
+Second is the Gauge. A gauge is a value that can go up or down freely. Examples include memory usage in bytes, the number of active connections, or queue depth. Gauges are ideal for tracking current values, queue sizes, and temperatures.
+
+Third is the Histogram. A histogram shows the distribution of values across buckets. For example, with HTTP request duration, you might track how many requests completed in less than 0.1 seconds, less than 0.5 seconds, less than 1 second, and so on. Histograms also track the sum of all values and the total count. This allows you to calculate percentiles like the 50th, 95th, and 99th percentile latencies. Histograms are perfect for latency distributions and request sizes.
+
+Implementing Metrics with Prometheus
+
+Let me describe how you'd implement metrics in practice using Prometheus, a popular metrics system. You would start by defining your metrics. You'd create a counter called "http requests total" that tracks total HTTP requests, with labels for method, endpoint, and status code. You'd create a histogram called "http request duration seconds" that tracks HTTP request latency, with labels for method and endpoint, and buckets set to 0.01, 0.05, 0.1, 0.5, 1.0, and 5.0 seconds. You'd also create a gauge called "http active requests" that tracks currently processing requests.
+
+Then in your actual code, when handling a request to your API users endpoint, you would increment the active requests gauge when the request starts. You'd record the start time. If the request succeeds, you'd increment the request count counter with labels for GET, the API users endpoint, and status 200. If the request fails with an exception, you'd increment the request count counter with labels for GET, the API users endpoint, and status 500. Finally, regardless of success or failure, you'd record the request duration in the histogram and decrement the active requests gauge.
+
+Key Metrics to Track
+
+There are three levels of metrics you should be tracking.
+
+At the service level, track your request rate in queries per second, your error rate as a percentage or count, your latency percentiles including the 50th, 95th, 99th, and even 999th percentiles, and your availability or uptime percentage.
+
+At the infrastructure level, track CPU utilization, memory usage, disk input output, network input output, and container restarts.
+
+At the business level, track metrics that matter to your business like orders per minute, revenue per hour, number of active users, and conversion rate.
+
+Logs
+
+Now let's talk about logs. The key to effective logging is structured logging.
+
+Structured Logging
+
+Here's the difference between bad logging and good logging. Bad logging uses unstructured strings like "User u-123 placed order ord-456 for $99.99". This makes it hard to search and analyze.
+
+Good logging uses structured JSON format. Instead of embedding values in a string, you log an event called "order placed" with structured fields: user ID, order ID, amount, currency, and item count. The output is a JSON object containing the timestamp, log level, the message "order placed", and all your structured fields including user ID, order ID, amount, currency, items count, the service name, and even the trace ID for correlation.
+
+Why is structured logging so important? First, it's searchable. You can easily query for "user_id equals u-123 AND level equals ERROR". Second, it's aggregatable. You can count orders by user. Third, it's parseable, which enables automated alerting.
+
+Log Levels
+
+Understanding log levels is crucial. From most detailed to least detailed:
+
+TRACE is for very detailed debugging information, rarely used in production.
+
+DEBUG is for development debugging.
+
+INFO is for normal operations like "request handled" or "job completed".
+
+WARN is for unexpected but handled situations like "retry succeeded" or "deprecated API used".
+
+ERROR is for failures requiring attention like "request failed" or "exception caught".
+
+FATAL is for situations where the system cannot continue, like startup failure or out of memory errors.
+
+For production environments, the recommendation is to log INFO level and above during normal operation, but use DEBUG and above during development. When debugging production issues, you can temporarily enable DEBUG logging for a specific component.
+
+Correlation IDs
+
+Correlation IDs, also called request IDs, are essential for distributed systems. Imagine a request flowing through your system: it hits the gateway, which calls the order service, which calls the payment service. If you generate a unique request ID at the gateway and propagate it through all services, you can trace the entire flow.
+
+The gateway would log "Received order request" with request ID "req-abc123". The order service would log "Creating order" with the same request ID "req-abc123". The payment service would log "Charging payment" with request ID "req-abc123". Now when you search your logs for "request_id equals req-abc123", you see the entire request flow across all services.
+
+Log Aggregation Architecture
+
+In a distributed system, you need a centralized place to collect and search logs. Here's how log aggregation typically works.
+
+You have multiple services, let's say Service A, Service B, and Service C. Each service writes logs locally. A log shipper, which could be Fluentd or Filebeat, collects logs from all services. These logs are sent to a message queue like Kafka, which acts as a buffer to handle spikes in log volume. From the message queue, logs flow into log storage, which could be Elasticsearch or Loki. Finally, you access your logs through a user interface like Kibana or Grafana.
+
+This architecture ensures you don't lose logs during traffic spikes and gives you a central place to search across all your services.
+
+Distributed Tracing
+
+Now let's discuss distributed tracing, which is essential for understanding request flow in microservices.
+
+The Problem Tracing Solves
+
+Imagine you receive a user complaint: "Checkout is slow." The checkout process involves multiple services: the gateway calls the cart service, which calls the inventory service, the payment service, and the order service. Which one is slow? Looking at logs, you can see each service took "some time," but you have no correlation between the services and no clear picture of the end-to-end flow.
+
+This is where distributed tracing comes in.
+
+Trace Structure
+
+A trace represents the entire journey of a single request through your system. It's identified by a unique trace ID. Within that trace, you have multiple spans, where each span represents work done by a single service.
+
+Let me walk through an example. You have a trace with ID "trace-abc123" representing a checkout request.
+
+Span 1 is the gateway, which is the parent span with no parent of its own. It's handling the checkout operation and takes 850 milliseconds with an okay status.
+
+Span 2 is the cart service, which is a child of Span 1. It's performing the "get cart" operation and takes 45 milliseconds with an okay status.
+
+Span 3 is the inventory service, also a child of Span 1. It's checking availability and takes 120 milliseconds with an okay status.
+
+Span 4 is the payment service, also a child of Span 1. It's charging the card and takes 650 milliseconds with an okay status. This is your bottleneck! The payment service is taking by far the longest time.
+
+Span 5 is the order service, also a child of Span 1. It's creating the order and takes only 30 milliseconds with an okay status.
+
+By visualizing all these spans together, you immediately see that the payment service is the bottleneck, taking 650 milliseconds out of the total 850 milliseconds.
+
+Implementing Tracing with OpenTelemetry
+
+OpenTelemetry is the industry standard for distributed tracing. Here's how you'd implement it.
+
+First, you set up a tracer provider and configure it to export traces to a system like Jaeger. You set up the Jaeger exporter with the host name "jaeger" and port 6831. You add a batch span processor to efficiently batch spans before sending them. Finally, you get a tracer instance to use in your code.
+
+In your actual code, when handling a checkout request, you start a span called "checkout" and set attributes on it like the user ID. Within that parent span, you create child spans for each operation. You'd create a child span called "get cart" for retrieving the cart. You'd create another child span called "process payment" for processing the payment. Each child span automatically links to its parent, building up the full trace.
+
+Context Propagation
+
+For tracing to work across services, you need context propagation. Here's how it works.
+
+When Service A calls Service B, Service A creates a span and injects the tracing context into the HTTP headers. Specifically, it sets a header called "traceparent" with a value containing the trace ID, span ID, and flags.
+
+When Service B receives the request, it extracts the context from the headers. It then creates its own child span using the extracted parent context. This way, Service B's span is correctly linked as a child of Service A's span, maintaining the full trace across service boundaries.
+
+Sampling
+
+At high traffic volumes, tracing every single request becomes expensive. This is where sampling comes in.
+
+There are three main sampling strategies.
+
+Head-based sampling decides at the start of the trace whether to keep it. For example, you might sample 1% of all traces. This is simple to implement but you might miss interesting traces, like those rare requests that fail or are unusually slow.
+
+Tail-based sampling decides at the end of the trace whether to keep it. You keep all traces with errors and all traces slower than some threshold. This is more complex because you need to buffer traces until they complete, but it ensures you capture the interesting cases.
+
+Adaptive sampling adjusts based on traffic. When traffic is low, you sample more. When traffic is high, you sample less. This balances observability with cost.
+
+Connecting the Three Pillars
+
+The real power comes from using metrics, logs, and traces together. Let me walk through a debugging scenario.
+
+An alert fires: error rate is greater than 5%. How do you investigate?
+
+First, you go to your metrics dashboard. The metrics show errors spiking at 14:32. You drill down and see the errors are coming from the payment service.
+
+Second, you go to your logs. You filter by service equals payment service, level equals ERROR, and time equals 14:32. You find log entries saying "Connection refused: payments database primary on port 5432."
+
+Third, you go to your traces. You find slow or errored traces at 14:32. You see that the database connection span is timing out.
+
+Putting it all together, you've identified the root cause: the database failed over, and the connection pool wasn't updated with the new primary.
+
+Exemplars take this integration further. Modern metrics systems support exemplars, which are links from metrics to traces. You might see a metric for HTTP request duration of 2.5 seconds, with a comment containing a trace ID. You can click on that high latency metric point and jump directly to the exact trace that caused it. This bridges the gap between the high-level view of metrics and the detailed view of traces.
+
+Alerting
+
+Effective alerting is an art. Let me share some key principles.
+
+Alert on Symptoms, Not Causes
+
+Bad alerts focus on causes like CPU greater than 80%, memory greater than 90%, or disk greater than 85%. These are resource metrics.
+
+Good alerts focus on symptoms like error rate greater than 1%, 99th percentile latency greater than 500 milliseconds, or success rate less than 99%. These are user-facing metrics.
+
+Why the difference? Because users don't care about your CPU usage. They care whether the service works. Your CPU might be at 90% but if the service is still fast and reliable, there's no user impact. Conversely, you might have a serious issue with low CPU usage, like a configuration error that's rejecting all requests.
+
+Alert Fatigue Prevention
+
+Alert fatigue is a real problem. If your team receives 100 alerts per day, they'll start ignoring all alerts, even the critical ones. Here are solutions.
+
+First, make alerts actionable. Every alert should have a clear response. If you receive an alert and there's nothing you can do about it, delete the alert.
+
+Second, deduplicate alerts. Group related alerts together. Don't send 50 alerts for 50 failing instances of the same service.
+
+Third, prioritize alerts. Use priority levels: P1 alerts page someone immediately, P2 alerts create a ticket for business hours, P3 alerts are reviewed weekly.
+
+Fourth, assign clear ownership. Each alert should have a clear owner who is responsible for responding.
+
+Fifth, review your alerts regularly. Delete alerts that aren't acted on. If you've been ignoring an alert for weeks, it's not providing value.
+
+Alert Example
+
+Let me describe a well-designed alert. This is for a payment service error rate alert. The alert is called "HighErrorRate". The alert triggers when the sum of the rate of HTTP requests with status codes in the 500 range, divided by the sum of the rate of all HTTP requests, is greater than 0.01, or 1%. The alert must be true for 5 minutes before firing, which prevents flapping on brief spikes. The alert is labeled as critical severity. The alert includes a human-readable summary: "Payment service error rate greater than 1%". It includes a description with the actual percentage value. And crucially, it includes a link to a runbook that describes exactly what to do when this alert fires.
+
+Key Concepts Checklist
+
+Let me summarize what you need to know about observability.
+
+You should be able to explain the three pillars of observability and when to use each one.
+
+You should be able to describe the RED method for request-focused monitoring and the USE method for resource-focused monitoring.
+
+You should know the three metric types: counter, gauge, and histogram, and when to use each.
+
+You should be able to explain the benefits of structured logging over unstructured logging.
+
+You should be able to describe distributed tracing and how context propagation works across services.
+
+You should be able to design an alerting strategy that focuses on symptoms rather than causes.
+
+Practical Insights
+
+Let me share some practical insights from running observability systems in production.
+
+Observability Costs
+
+Different types of observability have different costs. Metrics are low cost because they're aggregated. Instead of storing every single request, you store aggregated statistics. Logs are high cost because you store everything. Every log line is stored. Traces are medium cost if you sample intelligently. You don't trace everything, but you trace enough to understand your system.
+
+Cardinality Explosion
+
+Cardinality refers to the number of unique time series in your metrics system. High cardinality can kill your metrics system. Here's a bad example: creating a metric with a label for user ID. If you have millions of users, you now have millions of unique time series. This will overwhelm Prometheus or any metrics system. Here's a good example: creating a metric with a label for user tier, with values like "free", "pro", or "enterprise". Now you only have 3 time series, which is manageable. As a rule, avoid high cardinality labels in metrics.
+
+Log Retention Strategy
+
+Managing log storage costs requires a tiered retention strategy. Keep hot logs for 7 days on fast storage with full access. These are your most recent logs that you query frequently. Keep warm logs for 30 days on slower but still queryable storage. Keep cold logs for 1 year in archive storage. You need to restore them before you can query them, but they're available if needed for compliance or deep investigations.
+
+Trace Sampling in Production
+
+For production tracing, use an intelligent sampling strategy. Always trace errors, no matter how rare. Always trace slow requests that exceed your 99th percentile threshold. Sample 1% to 10% of normal traffic to understand baseline behavior. And support 100% sampling for specific user IDs when you're debugging a particular user's issue.
+
+SLO-Based Alerting
+
+Instead of alerting on absolute thresholds like "error rate greater than 1%", consider SLO-based alerting. If your monthly error budget is 0.1% errors, alert when you're burning through that budget faster than expected. Specifically, alert when you're projected to exhaust your error budget in less than 3 days. This ties alerting to the impact on your service level objectives, which is what actually matters to your users and your business.
+
+This concludes Chapter 21 on Observability: Metrics, Logs, and Traces.

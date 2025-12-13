@@ -1,0 +1,115 @@
+Part 9: Integrated Problem Scenarios
+
+In this chapter, we'll walk through five comprehensive backend engineering scenarios that combine multiple concepts from previous chapters. These scenarios are designed to help you practice system design thinking at the Staff-plus level. Each scenario includes requirements gathering, scale estimation, architectural decisions, and deep dives into critical components.
+
+Scenario 1: Design a Local Delivery Service, Similar to Gopuff or DoorDash
+
+Let's start by understanding the requirements for a local delivery service.
+
+On the functional side, users need to browse local store inventory, see real-time delivery ETAs, place orders and make payments, and track their driver. The system also needs to handle driver assignment and delivery confirmation.
+
+From a non-functional perspective, we need low latency for nearby store queries, the ability to handle dinner rush traffic which can be ten times normal volume, ninety-nine point nine percent availability, and accurate inventory management to prevent overselling.
+
+Now let's talk about scale estimation. We're targeting one million daily active users, with one hundred thousand orders per day. During peak dinner rush, we might see ten thousand orders per hour. The system manages one thousand dark stores, each with fifty thousand SKUs, or stock keeping units. We also have twenty thousand active drivers at any given time.
+
+In terms of storage requirements, user data for ten million users at one kilobyte each gives us ten gigabytes. Orders at one hundred thousand per day times three hundred sixty-five days times two kilobytes per order equals seventy-three gigabytes per year. Product data for one thousand stores times fifty thousand products times five hundred bytes equals twenty-five gigabytes. Driver location tracking generates two million writes per hour, as twenty thousand drivers send updates one hundred times per hour.
+
+Let's discuss the high-level architecture. At the top level, we have clients using mobile apps and web interfaces. These clients communicate with an API gateway that handles authentication, rate limiting, and routing. Behind the gateway, we have three main services: the catalog service for browsing products, the order service for handling purchases, and the delivery service for managing drivers and deliveries. Supporting these are the inventory service, payment service, and driver location service.
+
+Now let's dive into the key design decisions.
+
+First, store and product discovery. When a user opens the app, we need to quickly show them nearby stores and available products. The flow goes from user location to finding nearby stores to getting products. We use geospatial indexing, storing store locations in PostGIS or Redis Geo, to query for stores within five miles of a given latitude and longitude. We cache popular areas heavily. To meet the response time requirement of less than one hundred milliseconds, we use a CDN for static catalog content, Redis cache for inventory, and we precompute store assignments by zip code.
+
+Second, inventory management. The big challenge here is preventing overselling during rush periods. We have two main options. Option A is pessimistic locking. We start a database transaction, select the quantity from inventory for a specific SKU with a row lock using SELECT FOR UPDATE, check if the quantity is sufficient, update the inventory to decrement by the ordered amount, and commit. The pro is strong consistency. The con is lock contention during rush periods when many users are trying to buy the same popular items.
+
+Option B is optimistic locking with reservation. First, we reserve inventory with a soft lock that has a time-to-live, then process payment, and finally confirm the reservation or release it if payment fails. This approach is better for high concurrency scenarios because it doesn't hold database locks during payment processing.
+
+Third, driver assignment. When an order is placed, the system finds available drivers near the store, scores them by distance, current route, and acceptance rate, and sends an offer to the best driver. If that driver doesn't accept within a timeout period, we offer it to the next best driver. For real-time location tracking, drivers send their location every five seconds. We store this in Redis with a time-to-live. We use Redis's geospatial query capabilities to find nearby drivers quickly.
+
+Fourth, ETA calculation. The estimated time of arrival equals store preparation time plus driver pickup time plus transit time. We factor in historical prep time based on the store and order size, the current driver location, traffic data from the Google Maps API, and weather adjustments. We update the ETA every minute and push updates to the client via WebSocket for real-time updates.
+
+Scenario 2: Design a Real-Time Bidding System
+
+Let's move on to designing a real-time bidding system for online advertising.
+
+For functional requirements, the system receives ad requests from publishers with a one hundred millisecond SLA, queries multiple demand partners, selects the winning bid, and tracks impressions and clicks.
+
+For non-functional requirements, we need to handle one million requests per second at peak, maintain end-to-end latency under one hundred milliseconds, ensure no duplicate billings, and provide real-time budget tracking for advertisers.
+
+Here's how the architecture works. A publisher sends an ad request when a user visits a page with an available ad slot. The ad exchange service receives this request and has a ten millisecond budget to process it. The exchange simultaneously queries three DSPs, which stands for demand-side platforms, or bidders. Each bidder gets thirty milliseconds to respond. The responses go to the auction engine which has twenty milliseconds to run a second-price auction and perform fraud checks. Finally, the ad server returns the winning creative in ten milliseconds.
+
+Let's break down the key design decisions.
+
+First, low latency bidding. Our total budget is one hundred milliseconds. We allocate five milliseconds for request parsing, thirty milliseconds to fan out to DSPs in parallel with timeout handling, five milliseconds for the auction, five milliseconds for response generation, leaving fifty-five milliseconds as buffer. For DSP timeout handling, we set a hard thirty millisecond timeout, return the best bids we've received even if some DSPs haven't responded, and log late responses for analysis.
+
+Second, budget tracking. The challenge is handling one million requests per second while enforcing budgets in real-time. We use an approach of approximate budgets locally with periodic reconciliation. Each bidder node maintains a local budget counter in memory, decrements it on each bid, syncs with the central store every one hundred milliseconds, and stops bidding if the local budget is exhausted. The central budget store uses Redis with atomic operations, maps campaign ID to remaining budget, and performs periodic reconciliation with the billing system.
+
+Third, deduplication. Network retries can cause duplicate impressions, which would result in incorrect billing. We solve this with idempotent impression logging. We generate an impression ID by hashing the request ID, creative ID, and timestamp bucket. In Redis, we use SETNX, which stands for SET if Not eXists, to set the impression ID with a one-hour expiration. If the set succeeds, it's a new impression and we log it. If the set fails, it's a duplicate and we ignore it.
+
+Scenario 3: Design a Global Chat Application
+
+Now let's design a global chat application.
+
+For functional requirements, we need one-to-one and group messaging with up to one thousand members, message delivery and read receipts, online and offline status, push notifications, and message history.
+
+For non-functional requirements, we need real-time delivery under five hundred milliseconds, global users with minimized latency, message ordering within each conversation, and offline message queuing.
+
+The architecture is distributed globally. We have chat clusters in US West, US East, EU West, and Asia. These clusters communicate with each other and share data through a cross-region Kafka deployment with async replication.
+
+Let's discuss the key design decisions.
+
+First, message delivery. The flow goes from sender to chat service to Kafka to the recipient's chat service to WebSocket to the recipient. Here's the detailed flow: the client sends a message via WebSocket, the chat service validates it and assigns a message ID, we publish to a Kafka topic partitioned by conversation ID, a consumer routes the message to the recipient's connection, and if the recipient is offline, we store the message and send a push notification. Message ordering is guaranteed because Kafka partitions by conversation ID, ensuring all messages for a conversation go through the same partition in order.
+
+Second, presence tracking for online and offline status. The challenge is tracking millions of online users efficiently. We use a regional presence system with gossip protocol. In each region, when a user connects we add them to the local presence set, when they disconnect we remove them after a timeout to handle quick reconnects, and users send a heartbeat every thirty seconds. For cross-region presence, we use a gossip protocol that shares presence summaries like "User X is online in EU West". When checking if a user is online, we query the local region first, then remote regions if needed.
+
+Third, group messages. For small groups under one hundred members, we use fan-out on write. We send the message to all members immediately. This is simple and provides low latency. For large groups from one hundred to one thousand members, we use fan-out on read. We write to a group inbox and members fetch from that inbox. This is more scalable but has slightly higher latency.
+
+Fourth, message storage. For hot data, meaning recent messages, we use Cassandra with time-based partitioning. We use conversation ID as the partition key and message timestamp as the clustering key. For cold data, meaning old messages, we archive to S3 after thirty days and load on demand if a user scrolls back to view old messages.
+
+Scenario 4: Design a Video Processing Pipeline
+
+Let's design a video processing pipeline.
+
+For functional requirements, we need to accept video uploads up to ten gigabytes, transcode to multiple resolutions and formats, generate thumbnails, extract metadata, and deliver via CDN.
+
+For non-functional requirements, we need to process ten thousand videos per day, be resilient to failures with no lost videos, operate cost efficiently using spot instances, and provide progress tracking.
+
+The architecture starts with video upload using multipart upload to S3. When the upload completes, S3 generates an event that goes to a processing queue implemented with SQS, which stands for Simple Queue Service. A workflow orchestrator, implemented using AWS Step Functions, coordinates the processing steps. The workflow includes validation, transcoding in parallel for multiple resolutions, thumbnail generation, and publishing. The final processed videos are distributed via CDN.
+
+Let's discuss the key design decisions.
+
+First, reliable upload. Large files need resumable uploads. We use multipart upload with the following flow: the client requests an upload URL from our API, the API creates a multipart upload and returns an upload ID, the client uploads parts of five megabytes each, if a part fails the client retries just that part without re-uploading the entire file, the client signals completion, and S3 assembles all the parts. To track progress, we store part status in DynamoDB so uploads can resume from the last successful part.
+
+Second, the processing workflow. We use Step Functions state machine. It starts with validation of file type, size, and duration. Then we run parallel steps for transcoding to 1080p, 720p, and 480p, along with generating thumbnails. We wait for all parallel steps to complete, update the database with the results, notify the user, and end. Step Functions provides built-in retries per step. For failures, we use a dead letter queue for manual review.
+
+Third, cost optimization. Transcoding is CPU-intensive and expensive. We use spot instances which provide seventy to ninety percent cost savings. We handle interruptions gracefully by checkpointing progress to S3. We right-size instances, matching them to video resolution. For example, 4K videos use large instances while 480p videos use small instances. We also batch process videos, queuing them and processing in batches for better resource utilization.
+
+Scenario 5: Design a Distributed Rate Limiter
+
+Finally, let's design a distributed rate limiter.
+
+For functional requirements, we need to rate limit API requests per user or API key, support multiple limit tiers, return remaining quota in response headers, and allow bursting within limits.
+
+For non-functional requirements, we need sub-millisecond latency overhead, the ability to work across multiple API servers, handling over one hundred thousand rate limit checks per second, and graceful degradation if the rate limiter fails.
+
+The architecture flow starts with an API request going through an API gateway or load balancer. The request hits rate limit middleware that extracts the client ID from the API key, user ID, or IP address. The middleware checks the rate limit. If allowed, it increments the counter and proceeds with the request. If the limit is exceeded, it returns a 429 status code meaning too many requests. The middleware uses a Redis cluster with sliding window counters for distributed state.
+
+Here's a Python implementation of the sliding window counter in Redis. The check rate limit function takes a Redis client, a key identifying the client, a limit for the maximum number of requests, and a window size in seconds. It returns a tuple of whether the request is allowed and the remaining quota.
+
+The function works as follows. We get the current timestamp. We calculate the window start time by subtracting the window size from now. We create a Redis pipeline for atomic operations. First, we remove old entries from the sorted set that fall outside the window. Second, we count the current entries. Third, we add the current request with the current timestamp as the score. Fourth, we set an expiry on the key. We execute the pipeline and get back the current count. We calculate the remaining quota and whether the request is allowed.
+
+Now let's discuss handling failures. What happens if Redis goes down? We have four options.
+
+Option one is fail open, meaning allow all requests. The risk is no rate limiting during the outage. Use this when availability is more important than protection.
+
+Option two is fail closed, meaning reject all requests. The risk is a complete outage. Use this when protection is critical.
+
+Option three is local rate limiting. Each server tracks rate limits locally. It's less accurate but functional. This provides the best of both worlds.
+
+Option four is using a circuit breaker on Redis. After N failures, we fall back to local rate limiting. We periodically retry Redis to see if it's back up.
+
+Key Concepts Checklist
+
+Let's review the key concepts for system design scenarios. First, clarify requirements, both functional and non-functional. Second, estimate scale including users, requests, and storage. Third, draw a high-level architecture. Fourth, identify critical paths and bottlenecks. Fifth, deep dive into two to three key components. Sixth, discuss trade-offs of design decisions. Seventh, address failure modes and recovery strategies. Eighth, consider monitoring and observability.
+
+These five scenarios demonstrate how to combine multiple backend engineering concepts into complete system designs. Practice working through scenarios like these, always starting with requirements, estimating scale, designing the architecture, and then deep diving into the most critical or interesting components. Remember to discuss trade-offs and failure modes, as these discussions demonstrate Staff-plus level thinking.

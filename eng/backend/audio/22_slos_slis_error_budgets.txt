@@ -1,0 +1,299 @@
+Chapter 22: Service Level Objectives, Service Level Indicators, and Error Budgets
+
+Why Measuring Reliability Matters
+
+Let's imagine your payment service has been working fine for months. In the first scenario, where you have no Service Level Objectives or SLOs, the developer says "The service is up!" while the on-call engineer gets paged at 2 AM for ninety-nine point eight percent availability. Meanwhile, the product manager asks "Why are we investing in reliability?"
+
+In the second scenario with SLOs, you have a clear target: ninety-nine point nine percent availability, which equals forty-three minutes of allowed downtime per month. Your error budget shows forty-three minutes remaining. The last incident took fifteen minutes, leaving twenty-eight minutes left. Now you can answer important questions with data. Should we roll back? Check the error budget. Can we deploy on Friday? Check the error budget. Should we invest in reliability or features? Make a data-driven decision.
+
+Without SLOs, you face several problems. First, subjective arguments about reliability versus velocity with no clear way to resolve them. Second, arbitrary alerts like "CPU greater than eighty percent" - but why eighty percent? What makes that threshold meaningful? Third, no data to justify reliability investments to leadership. Fourth, burnout from alert fatigue on meaningless thresholds that don't actually tell you if users are having a good experience.
+
+With SLOs, everything changes. You have objective reliability targets tied to actual user experience. You can quantify the risk for each deployment. You have clear communication between engineering and product teams. And you have focused alerts on what actually impacts users, not just internal metrics.
+
+Service Level Indicators
+
+Let me explain what Service Level Indicators, or SLIs, are and why they matter.
+
+The Problem
+
+You can't improve what you can't measure. But what should you measure?
+
+Bad metrics would be things like: CPU usage at forty-five percent. This doesn't tell you if users are happy. Database connections at one hundred twenty-seven. This is an internal implementation detail. Memory at eight point two gigabytes. This is meaningless without understanding user impact.
+
+Good SLIs would be: Request success rate at ninety-nine point ninety-five percent. This tells you the user gets a correct response. Request latency at the ninety-ninth percentile of two hundred forty-five milliseconds. This tells you the user experiences a fast response. Data freshness of less than five minutes old. This tells you the user sees current data.
+
+An SLI is a quantitative measure of the service level provided to users. Think of it as the actual measurement of something users care about.
+
+How It Works
+
+Picture this flow: A user makes a request to your service. Inside your service, you have three measurement points. First, you measure success versus failure - did the request work or not? Second, you measure latency - how long did it take? Third, you measure completeness - did we return all the data we should have? These three measurements produce your SLIs. For example, success rate of ninety-nine point ninety-five percent, latency of two hundred fifty milliseconds, and completeness of one hundred percent.
+
+Implementation
+
+Let me describe how you would implement SLI tracking in code. You would create a class called SLI Tracker that stores metrics for each request. For each request, you record the timestamp, whether it succeeded, the latency in milliseconds, and the HTTP status code.
+
+The tracker has methods to calculate different SLIs. The calculate availability SLI method looks at a time window, like the last hour, and calculates what percentage of requests succeeded. It filters all metrics to only those in the time window, then divides successful requests by total requests.
+
+The calculate latency SLI method calculates a specific percentile, like the ninety-ninth percentile. It filters to the time window, sorts all latencies, and finds the value at the ninety-ninth percentile position.
+
+You might also calculate success rate broken down by status code, showing what percentage of requests returned two hundred versus five hundred versus other codes.
+
+In practice, you would record each request like this: record a successful request with one hundred twenty millisecond latency and status code two hundred. Record a failed request with five thousand millisecond latency and status code five hundred. Record another successful request with ninety-five millisecond latency and status code two hundred.
+
+Then you calculate your SLIs over a time window, like the last hour. You get availability as a percentage and ninety-ninth percentile latency in milliseconds.
+
+Common SLI Types
+
+Let me describe the different types of SLIs you might use.
+
+Availability measures the percentage of requests that succeed. For example, ninety-nine point ninety-five percent of requests return successful status codes like two hundreds or three hundreds. This is good for user-facing APIs where success versus failure is clear-cut.
+
+Latency measures the percentage of requests faster than a threshold. For example, ninety-nine percent of requests complete in less than three hundred milliseconds. This is good for interactive services where speed matters to user experience.
+
+Throughput measures requests processed per second. For example, ten thousand queries per second sustained. This is good for batch processing systems.
+
+Correctness measures the percentage of results that are accurate. For example, ninety-nine point ninety-nine percent of reads return the correct data. This is critical for systems where data consistency matters.
+
+Freshness measures data age. For example, ninety-five percent of data is less than five minutes old. This is good for real-time systems where stale data hurts the user experience.
+
+Durability measures the percentage of data retained. For example, eleven nines of durability, meaning ninety-nine point nine nine nine nine nine nine nine nine nine percent of objects survive. This is essential for storage systems.
+
+When should you use availability SLIs? Use them for user-facing services where whether it works or doesn't work is clear.
+
+When should you NOT use availability SLIs? Don't use them for background jobs or batch processing. Instead use freshness or completeness metrics, because a background job being temporarily down might not matter as long as it completes eventually.
+
+Service Level Objectives
+
+The Problem
+
+You've measured SLIs. Now what? What counts as "good enough"?
+
+Without an SLO, an engineer might say "We had three minutes of downtime" and the product manager asks "Is that bad?" and the engineer responds "...depends?" There's no clear answer.
+
+With an SLO, you define the target. The SLO is ninety-nine point nine percent availability, which equals forty-three point two minutes of allowed downtime per month. The actual downtime was three minutes. Status: within SLO, with forty point two minutes of budget remaining. Now everyone understands whether three minutes is acceptable or not.
+
+An SLO is a target value or range for an SLI. It's the threshold that separates acceptable from unacceptable service levels.
+
+How It Works
+
+Think of it as a comparison between measurement and target. Your SLI measurement of availability is ninety-nine point ninety-seven percent. Your SLO target is at least ninety-nine point nine percent. Status: Good! You have error budget remaining.
+
+Your SLI measurement of latency at the ninety-ninth percentile is four hundred fifty milliseconds. Your SLO target is at most three hundred milliseconds. Status: Violation! You've burned error budget.
+
+Your SLI measurement of freshness is two minutes. Your SLO target is at most five minutes. Status: Good! You have error budget remaining.
+
+Implementation
+
+In code, you would create an SLO class that has a name, description, target value like zero point nine nine nine for ninety-nine point nine percent, and a measurement window in seconds.
+
+The SLO has a method to check compliance. It takes the current SLI value and compares it to the target. If the SLI meets or exceeds the target, the status is healthy. If the SLI is close to the target but not quite there, within ten percent of the error budget, the status is warning. If the SLI is well below the target, the status is violated.
+
+The method returns both the status and details like what the target was, what the actual value was, the difference, and what percentage of target you achieved.
+
+You would also calculate the error budget. The total error budget is one minus the target. For a ninety-nine point nine percent target, that's zero point one percent error budget. Then you calculate how much budget you've used based on the actual SLI value. The errors you experienced divided by total error budget tells you what percentage of budget you consumed, and one minus that tells you what percentage remains.
+
+For example, you might have an availability SLO with a target of ninety-nine point nine percent over a thirty-day window. If your current availability is ninety-nine point ninety-seven percent, you check compliance and calculate that you've consumed some small percentage of your error budget and have most of it remaining.
+
+Setting Realistic SLOs
+
+A useful approach is to start with acceptable downtime and calculate the required availability. The formula is: take the total minutes in a month, about forty-three thousand two hundred minutes, subtract the acceptable downtime minutes, and divide by total minutes.
+
+For example, ninety-nine point nine percent availability allows forty-three point two minutes of downtime per month. Ninety-nine point ninety-five percent allows twenty-one point six minutes per month. Ninety-nine point ninety-nine percent allows just four point three two minutes per month.
+
+Let me describe what different availability levels mean in terms of downtime.
+
+Ninety percent availability, sometimes called one nine, allows thirty-six and a half days of downtime per year, or three days per month, or sixteen point eight hours per week.
+
+Ninety-nine percent, or two nines, allows three point six five days per year, seven point two hours per month, or one point six eight hours per week.
+
+Ninety-nine point nine percent, three nines, allows eight point seven six hours per year, forty-three point two minutes per month, or ten point one minutes per week.
+
+Ninety-nine point ninety-five percent allows four point three eight hours per year, twenty-one point six minutes per month, or five point zero four minutes per week.
+
+Ninety-nine point ninety-nine percent, four nines, allows fifty-two point six minutes per year, four point three two minutes per month, or one point zero one minutes per week.
+
+Ninety-nine point nine nine nine percent, five nines, allows just five point two six minutes per year, twenty-five point nine seconds per month, or six point zero five seconds per week.
+
+When should you use ninety-nine point nine percent? This works for most user-facing services. It balances reliability with velocity.
+
+When should you NOT use ninety-nine point ninety-nine percent or higher? Don't use such high targets unless contractually required or the system is life-critical. Cost grows exponentially and development velocity drops dramatically for each additional nine.
+
+Service Level Agreements
+
+The Problem
+
+SLOs are internal targets. SLAs are external commitments with real consequences.
+
+With an SLO, which is internal, you might say "We aim for ninety-nine point nine percent availability." If you miss it, you learn, improve, and face no penalty. It's a goal.
+
+With an SLA, which is an external contract, you say "We guarantee ninety-nine point nine percent availability." If you miss it, you refund ten percent of monthly fees. You face potential customer churn. You have legal and reputational risk. It's a promise with teeth.
+
+An SLA is a contractual commitment with penalties for violations.
+
+How It Works
+
+Picture an SLA structure. You have an SLI, which is availability. You have an SLO target of at least ninety-nine point nine percent. The SLA states that if availability falls below ninety-nine point nine percent, the customer gets a credit.
+
+The penalties are tiered. If availability is between ninety-nine percent and ninety-nine point nine percent, the customer gets a ten percent monthly credit. If availability is between ninety-five percent and ninety-nine percent, they get a twenty-five percent monthly credit. If availability falls below ninety-five percent, they get a one hundred percent monthly credit - a full refund.
+
+Implementation
+
+In code, you would create an SLA class with penalty tiers. Each tier defines a minimum availability, maximum availability, credit percentage, and description.
+
+The SLA has a method to calculate penalties. It takes the actual availability you achieved and the monthly revenue from the customer. If you met the SLA target, no penalty is triggered. If you missed the target, the method finds which penalty tier applies based on how far below target you fell. It calculates the credit amount as the monthly revenue multiplied by the credit percentage for that tier.
+
+For example, imagine you have an SLA with a ninety-nine point nine percent target and three penalty tiers. Minor degradation from ninety-nine point zero to ninety-nine point nine percent gives a ten percent credit. Significant degradation from ninety-five to ninety-nine percent gives a twenty-five percent credit. Severe degradation below ninety-five percent gives a one hundred percent credit.
+
+If your actual availability was ninety-nine point seven percent and the monthly revenue was ten thousand dollars, you would trigger the minor degradation tier and owe a one thousand dollar credit.
+
+SLO versus SLA Buffer
+
+A best practice is to set your SLA looser than your SLO. For example, your internal SLO might be ninety-nine point ninety-five percent, which is what you aim for. But your external SLA promise is ninety-nine point nine percent. The buffer of zero point zero five percent protects you against edge cases, gives you room for experimentation, and prevents SLA violations from normal variance in your metrics.
+
+When should you use SLAs? Use them for customer contracts, enterprise customers, and regulated industries where contractual guarantees are expected.
+
+When should you NOT use SLAs? Don't use them for internal services or early-stage products. Just use SLOs instead. Avoid the legal and financial risk until you have stable, proven reliability.
+
+Error Budgets
+
+The Problem
+
+Perfect reliability is impossible and actually counterproductive.
+
+In the first scenario without an error budget, every outage triggers an emergency response, blame culture, fear of deploying, and slow innovation. Teams become paralyzed by the fear of any downtime.
+
+In the second scenario with an error budget, you have forty-three minutes per month of allowed downtime. You plan to use ten minutes for planned maintenance, fifteen minutes for deployments that carry small risks, and you actually used eight minutes for unplanned incidents. Total is thirty-three minutes, leaving ten minutes remaining. Status: Healthy! Keep shipping features.
+
+An error budget is the allowed unreliability, calculated as one minus the SLO. It's permission to fail within limits.
+
+How It Works
+
+Let me walk through the math. Your SLO is ninety-nine point nine percent availability. Your error budget is one hundred percent minus ninety-nine point nine percent, which equals zero point one percent.
+
+In a thirty-day month, there are forty-three thousand two hundred minutes total. Your error budget of zero point one percent equals forty-three point two minutes of allowed downtime.
+
+You track how you spend this budget. An incident on March first consumed fifteen minutes. An incident on March eighth consumed eight minutes. A risky deploy on March fifteenth consumed five minutes. Total consumed is twenty-eight minutes, which is sixty-four point eight percent of your budget. Remaining is fifteen point two minutes, which is thirty-five point two percent. Status: Warning! You should slow down deploys to avoid exhausting your budget before the month ends.
+
+Implementation
+
+In code, you would create an Error Budget class that tracks events consuming your budget. Each event records a timestamp, duration in minutes, description, and event type like incident, planned maintenance, or deploy.
+
+The error budget calculates the total budget based on your SLO and time window. For ninety-nine point nine percent availability over thirty days, the total budget is about forty-three minutes.
+
+You can add events that consumed budget. The get consumed budget method looks at a rolling time window, sums up all events in that window, and calculates consumed minutes, consumed percentage, remaining minutes, and remaining percentage.
+
+The get policy action method determines what you should do based on remaining budget. If more than fifty percent remains, the policy is "Proceed: Plenty of budget, ship features aggressively." If twenty-five to fifty percent remains, it's "Caution: Moderate budget remaining, balanced approach." If ten to twenty-five percent remains, it's "Slow down: Low budget, focus on reliability." If less than ten percent remains, it's "Freeze: Critical budget exhaustion, emergency reliability work only."
+
+You can also check if you can afford a risky change. The can afford risk method takes an estimated failure duration and returns whether that fits within your remaining budget.
+
+For example, you create an error budget with ninety-nine point nine percent target over thirty days. You record a database failover incident ten days ago that lasted fifteen minutes. You record an API rate limit breach three days ago that lasted eight minutes. You check the status and see you've consumed twenty-three minutes out of forty-three, with twenty minutes remaining. The policy says "Caution: balanced approach." If you're considering a risky deploy estimated to potentially cause five minutes of downtime, you can check whether you can afford that risk given your remaining budget.
+
+Error Budget Policy
+
+Different organizations handle budget levels differently, but here's a common approach.
+
+When more than seventy-five percent of budget remains, ship aggressively. Try experimental features. Deploy frequently.
+
+When fifty to seventy-five percent remains, maintain normal velocity with your standard deploy cadence.
+
+When twenty-five to fifty percent remains, focus on safety. Do more testing. Make smaller changes.
+
+When ten to twenty-five percent remains, enter a reliability freeze. Only deploy critical fixes, no new features.
+
+When less than ten percent remains, enter emergency mode. All hands focus on reliability. No deploys except emergency fixes.
+
+Burn Rate Alerts
+
+The Problem
+
+Traditional threshold alerts are both noisy and slow to catch real problems.
+
+A bad alert might be "Error rate greater than one percent." This fires when you have a spike for ten seconds, paging the on-call engineer, but then it resolves itself. It was a false alarm. But when you have slow degradation over days, there's no alert until the situation becomes catastrophic because you're still below the one percent threshold.
+
+A good alert would be "Burning error budget ten times faster than sustainable." This approach ignores short spikes because they're self-healing. But it catches sustained issues within minutes. And it's tied to actual user impact based on your SLO.
+
+Burn rate is how fast you're consuming your error budget.
+
+How It Works
+
+Think about burn rates. A normal burn rate of one X means you're consuming budget at exactly the sustainable rate. You'll hit zero percent budget at the end of your time window, which is fine - that's what the budget is for.
+
+A fast burn rate of ten X means you're consuming budget ten times faster than sustainable. You'll exhaust your entire month's budget in one-tenth of the time - just three days. You need to alert and fix this immediately.
+
+The calculation works like this. Your current error rate is two percent, meaning ninety-eight percent availability. Your SLO target is ninety-nine point nine percent, giving you a zero point one percent error budget. Burn rate equals current error rate divided by error budget, which is two percent divided by zero point one percent, which equals twenty X. At this rate, you'll burn your entire month's budget in thirty days divided by twenty, which is one and a half days.
+
+Implementation
+
+In code, you create a burn rate monitor that knows your SLO target and time window. The calculate burn rate method takes the current observed error rate and divides it by your error budget to get the burn rate multiplier. A value of one point zero is sustainable. Anything higher means you're burning too fast.
+
+The time to exhaustion method calculates how many hours until your error budget is completely exhausted at the current burn rate. If burn rate is ten X, you'll exhaust the budget in one-tenth of your time window.
+
+The check alert method evaluates whether to alert based on your burn rate configuration. You define multiple alert configurations, each with a time window, burn rate threshold, and notification window. The method compares your actual burn rate to the threshold and determines severity.
+
+Google's SRE team recommends a multi-window alerting strategy. You configure three different alerts.
+
+The first is a critical fast burn alert. It looks at a five-minute window with a burn rate threshold of fourteen point four X. This catches severe incidents quickly, alerting within sixty minutes. At that burn rate, you'd exhaust your budget in about two hours.
+
+The second is a high sustained burn alert. It looks at a sixty-minute window with a burn rate threshold of six X. This catches ongoing issues, alerting within six hours. At that burn rate, you'd exhaust your budget in about five days.
+
+The third is a warning slow burn alert. It looks at a twenty-four-hour window with a burn rate threshold of three X. This catches slow degradation, alerting within twenty-four hours. At that burn rate, you'd exhaust your budget in about ten days.
+
+Let me describe what each window catches. The five-minute window with fourteen X burn rate threshold catches severe incidents like complete outages. The one-hour window with six X burn rate threshold catches sustained issues like a memory leak gradually degrading performance. The twenty-four-hour window with three X burn rate threshold catches slow degradation like a database gradually getting slower.
+
+You need multiple windows. If you use just one window, you'll either page too much on temporary blips or too little, missing slow burns.
+
+Comparison of SLO Types
+
+Let me compare the different types of SLOs you might use.
+
+Availability SLOs measure the percentage of successful requests. An example would be ninety-nine point nine percent of requests return successful status codes. The pros are that it's simple and universally applicable. The con is it doesn't capture latency problems - requests could be slow but still count as successful. This is best for user-facing APIs where success versus failure is clear.
+
+Latency SLOs measure the percentage of requests under a threshold. An example would be ninety-nine percent of requests complete in less than three hundred milliseconds. The pro is it captures user experience of speed. The con is choosing the right threshold is difficult and varies by use case. This is best for interactive applications where responsiveness matters.
+
+Correctness SLOs measure the percentage of accurate results. An example would be ninety-nine point ninety-nine percent of reads return correct data. The pro is it's critical for data systems where accuracy matters most. The con is it's hard to measure in practice - how do you know what the "correct" answer is? This is best for databases and financial systems where data integrity is paramount.
+
+Freshness SLOs measure data age. An example would be ninety-five percent of data is less than five minutes old. The pro is it's good for asynchronous systems where real-time isn't required but staleness matters. The con is it's not applicable to all systems. This is best for analytics pipelines and caches.
+
+Durability SLOs measure the percentage of data retained. An example would be eleven nines of durability. The pro is it's absolutely critical for storage systems. The con is it's only relevant for storage - it doesn't make sense for compute services. This is best for object stores and backup systems.
+
+Key Concepts Checklist
+
+Let me review the key concepts you need to understand.
+
+First, choose appropriate SLIs. These might be availability, latency, or correctness depending on what matters to your users.
+
+Second, set realistic SLOs based on actual user needs, not aspirational targets or what sounds impressive.
+
+Third, calculate error budgets using the formula: one minus SLO.
+
+Fourth, implement error budget policies that actually enforce behavioral changes, like freezing deployments when budget is low.
+
+Fifth, set up burn rate alerts using a multi-window strategy to catch different types of problems.
+
+Sixth, understand the distinction between SLOs, which are internal targets, and SLAs, which are contractual commitments.
+
+Seventh, buffer your SLAs to be looser than your SLOs. For example, ninety-nine point nine percent SLA but ninety-nine point ninety-five percent SLO.
+
+Eighth, track error budget consumption by incident type to understand where your reliability problems come from.
+
+Ninth, use error budgets to have data-driven negotiations about feature work versus reliability investments.
+
+Practical Insights
+
+Let me share some hard-won wisdom from operating production systems.
+
+Start simple and iterate. For your first SLO, just measure availability. Don't over-engineer with complex multi-dimensional SLIs. Use your historical data from last quarter. What availability did you actually achieve? Set your initial SLO equal to historical performance minus a ten percent buffer. After three to six months of consistently hitting your targets, consider tightening them.
+
+Error budgets enable velocity. Without an error budget, the product manager says "Ship faster!" and engineering says "But reliability!" and you have endless arguments with no resolution. With an error budget, you can look at the data. The error budget shows seventy percent remaining. The decision becomes clear: ship the risky feature, we can afford it. If the budget drops to twenty percent, we'll slow down. You make data-driven decisions instead of political arguments.
+
+Alert on burn rate, not thresholds. A bad alert says "Error rate greater than one percent." When error rate spikes to one and a half percent for ten seconds, it pages the on-call engineer for a false alarm. But when error rate is point nine percent sustained for three days, there's no alert even though you've exhausted your error budget. A good alert says "Burning budget ten times too fast." This approach ignores short spikes that self-heal. But it alerts after a few hours of sustained point nine percent errors. And it's tied to actual SLO impact.
+
+Use multiple time windows to catch different types of issues. A five-minute window with fourteen X burn rate threshold catches severe incidents like outages. A one-hour window with six X burn rate threshold catches sustained issues like memory leaks. A twenty-four-hour window with three X burn rate threshold catches slow degradation like databases getting progressively slower. Don't use just one window or you'll either page too much or miss important problems.
+
+The buffer between SLO and SLA is critical. A common mistake is to set SLO at ninety-nine point ninety-nine percent and SLA also at ninety-nine point ninety-nine percent. The result is that any incident triggers an SLA violation, leading to refunds and pain. A better approach is SLO at ninety-nine point ninety-nine percent as your internal target, but SLA at ninety-nine point nine percent as your customer promise. The buffer of zero point zero nine percent protects you against normal variance.
+
+Your error budget policy must have teeth to be effective. A weak policy says "When budget is low, consider focusing on reliability." This gets ignored and features ship anyway. A strong policy says "Budget below twenty percent triggers automated deploy freeze. All hands focus on reliability. VP approval required for any feature work." This gets respected and reliability actually improves.
+
+Track your error budget by source to understand where to invest. You might find that forty percent of budget was consumed by planned maintenance, which is acceptable. Thirty-five percent came from deployment problems, showing room to optimize your deployment process. Twenty-five percent came from unplanned incidents, which you need to reduce through better monitoring and faster incident response. This breakdown tells you where to focus your reliability efforts.
+
+This concludes Chapter 22 on Service Level Objectives, Service Level Indicators, and Error Budgets.

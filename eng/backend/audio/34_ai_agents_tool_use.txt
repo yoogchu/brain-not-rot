@@ -1,0 +1,151 @@
+Chapter 34: A I Agents and Tool Use
+
+Why A I Agents?
+
+Let's start by understanding why agentic systems matter. Imagine a scenario without agents. A user asks, "Find all customers who churned last month and send them offers." Without an agentic system, an engineer would need to manually write a custom script, query the database by hand, craft an email template, run the send script, and monitor results manually. This process takes two to three hours. With an agentic system, the agent understands the user's intent, queries the database using an S Q L tool, generates personalized emails via a large language model, sends them via an email tool, and reports the results. This entire process takes about 30 seconds.
+
+However, naive agent implementations fail in production. Let's look at a normal request: "Summarize Q3 sales." The agent calls a function called get sales data, which costs 2 cents, and returns a successful summary. But consider an edge case: "Compare Q1 through Q4 sales for all regions and products." A naive agent might call get sales data 1000 times in a loop for different combinations of quarters, regions, and products. After 200 calls, the token limit is exceeded. The total cost is $2000, the time taken is 10 minutes, and the result is a failure.
+
+Production-ready agents need several key features. They need guardrails to control cost, latency, and tool call limits. They need error recovery and retries when things go wrong. They need observable execution traces so developers can debug issues. And they need deterministic testing to ensure reliability.
+
+The ReAct Pattern
+
+The fundamental problem agents solve is this: Large language models are trained to generate text, not execute actions. They hallucinate tool results instead of calling real tools.
+
+The ReAct pattern, which stands for Reasoning plus Acting, solves this by interleaving thinking and tool use. Here's how it works conceptually. First, the user submits a query. Then the agent enters a loop that continues until it's done or reaches a maximum number of iterations. In each iteration, the agent has a thought phase where it reasons about what it needs to do next. Then it takes an action by calling a tool with specific arguments. After that, it receives an observation, which is the tool's result. The agent can either loop back with another thought based on the observation, or provide a final answer to return to the user.
+
+Let me explain the implementation. We start by defining a Tool data class that has a name, a description, a function to call, and parameters with descriptions. Then we create a ReActAgent class that takes an L L M client, a list of tools, and a maximum iteration count. The agent builds a system prompt that describes all available tools and their parameters, along with instructions on the format the agent should use. The format includes sections for Thought, Action, Action Input, and Observation.
+
+When you run the agent with a user query, it initializes a conversation with the system prompt and user query. Then it enters a loop for up to the maximum number of iterations. In each iteration, it gets the next action from the L L M by calling the chat method. The agent's output is examined to check if it contains "Final Answer:" which signals completion. If not, the agent parses the action and action input from the output, executes the tool, and adds the observation back to the conversation. The loop continues until either a final answer is reached or the maximum iterations are exceeded.
+
+For parsing actions, the code extracts lines starting with "Action:" and "Action Input:" from the agent's output. The action input is parsed as J S O N. For executing tools, the code looks up the tool by name and calls its function with the parsed inputs.
+
+Let's look at example usage. You might have a search database function that searches a customer database and returns results like customer I D, name, and status. You might also have a send email function that sends an email to a customer I D with a template. You define these as Tool objects with descriptions and parameters. Then you create the ReActAgent with your L L M client and tools, and run it with a query like "Find churned customers and send them a 20% discount offer." The agent will automatically figure out to first search the database for churned customers, then send emails to each of them.
+
+Now let's discuss trade-offs. For transparency, the ReAct pattern provides a full reasoning trace that's visible, but this comes at the cost of being verbose with high token usage. For reliability, you can retry on errors, but there are no guarantees of completion. For cost, you only pay per action, but there are many L L M calls in the loop. For latency, execution is sequential, which means it's slow for multi-step tasks.
+
+When should you use the ReAct pattern? It's good for complex tasks requiring multi-step reasoning and when you need interpretability. When should you not use it? Avoid it for simple single-tool calls, latency-critical paths, or high-volume requests.
+
+Function Calling A P Is
+
+The problem with text-based tool calling is that parsing tool calls from L L M text is brittle. Large language models might return invalid J S O N, misspell function names, or hallucinate parameters that don't exist.
+
+Modern L L Ms solve this with native function calling that provides structured outputs. Here's how it works. The user submits something like "Get weather in San Francisco." The L L M is provided with function definitions, such as get weather with parameters for location and units, search web with a query parameter, and send email with recipient and body parameters. The L L M then returns a structured function call as a J S O N object with the name of the function, like "get weather," and arguments as a dictionary with location set to "San Francisco" and units set to "celsius." You then execute this function and return the result.
+
+Let me walk through an implementation using the OpenAI A P I. You create a FunctionCallingAgent class that takes an A P I key. It maintains a tools registry that maps function names to actual callable functions. You register tools using their schema, which is in OpenAI's format. When you run the agent, you call the OpenAI chat completions A P I with your messages, tools, and tool choice set to "auto" to let the model decide when to call functions.
+
+If the response doesn't contain tool calls, you return the text response. If it does contain tool calls, you execute each one by looking up the function in your registry, calling it with the parsed arguments, and adding the result to the messages. Then you make another call to the L L M with the tool results included, and it generates a final response incorporating those results.
+
+Here's what a tool schema looks like in OpenAI's format. It has a type of "function" and a function object with a name like "get weather," a description explaining what it does, and parameters that define the expected arguments as a J S O N schema. You specify the type as "object," define properties for each parameter like location and units, and mark which parameters are required.
+
+The actual function implementation is straightforward. For example, get weather takes a location string and optional units parameter, and returns a dictionary with the location, temperature, units, and condition.
+
+To use this, you create the agent, register your tools with their schemas, create a messages array with the user query, and call run with the messages and tools. The agent handles calling the weather function and formulating a natural language response like "The current weather in Tokyo is partly cloudy, 18 degrees Celsius."
+
+Let's discuss trade-offs. For reliability, function calling provides structured outputs that are validated, but you get vendor lock-in to specific A P Is. For error handling, type checking is built-in, but you still need runtime validation for business logic. For development speed, you write less parsing code, but you need to learn A P I-specific schemas. For token efficiency, you don't need verbose prompts, but function schemas themselves use tokens.
+
+When should you use function calling A P Is? They're ideal for production systems where you need reliability and when you're using OpenAI, Anthropic, or similar providers. When should you not use them? Avoid them when using open source models without function calling support, or when you need full control over the implementation.
+
+Agent Memory Systems
+
+The problem with agent memory is that agents need to remember past interactions to maintain context, but L L M context windows are limited and expensive to use.
+
+The solution is a three-tier memory hierarchy. At the top is working memory, which holds the current context. This includes the last N messages and current tool results. It's fast but expensive since it lives in the L L M's context window. In the middle is short-term memory for the session. This includes conversation history and recent decisions, typically stored in Redis or an in-memory cache. At the bottom is long-term memory for facts. This includes user preferences and domain knowledge, stored in a vector database for semantic retrieval.
+
+Let me explain the implementation. You create an AgentMemory class that takes a Redis client, a vector database, and a maximum working memory size. When building context for a query, the get context method combines all three memory layers. First, it gets working memory by fetching recent messages from Redis. Second, it searches long-term memory using vector search to find relevant facts based on the user query. Third, it gets session metadata like user preferences and state. All three are combined and returned.
+
+For working memory, you store recent conversation in Redis using a list. You retrieve the last N messages using the lrange command. For long-term memory, you use vector search on your database with filters for the session I D to find the top K most relevant facts. For session metadata, you store and retrieve J S O N objects from Redis.
+
+When adding messages, you can optionally save important facts to long-term memory. You add the message to Redis with an expiration time, and if the save to long term flag is set, you also add it to the vector database with metadata. For updating session metadata, you get the existing metadata from Redis, merge in the updates, and save it back with a longer expiration time, like 30 days.
+
+In your agent, you use this memory system by getting context at the start of each run, building a system prompt that includes relevant long-term memories and user preferences, and saving messages to memory after generating responses.
+
+Let's discuss trade-offs. For context window usage, you only include relevant information in context, but retrieval adds latency to each request. For cost, it's cheaper than including full history, but you incur vector database costs. For accuracy, you have access to all past data, but retrieval can sometimes miss important context. For complexity, you get a modular architecture, but you have multiple systems to maintain.
+
+When should you use memory systems? They're essential for long conversations, multi-session agents, and personalization. When should you not use them? Skip them for stateless A P Is, single-turn interactions, or privacy-sensitive data where you can't store history.
+
+Multi-Agent Architectures
+
+The problem is that single agents struggle with complex tasks requiring different skills, such as research, writing, coding, and validation. Each of these skills might be better handled by a specialized model or prompt.
+
+The solution is having specialized agents collaborate on tasks. You have an orchestrator or supervisor at the top that routes tasks to specialist agents. For example, you might have a researcher agent with tools for web search and database access, a writer agent with tools for templates and grammar checking, and a reviewer agent with validators and fact-checking tools. All these agents share state through a common memory system.
+
+Let me walk through the implementation. First, you define an AgentRole enumeration with values like ORCHESTRATOR, RESEARCHER, WRITER, and REVIEWER. You create an AgentMessage data class for communication between agents, which includes who it's from, who it's to, the task, context, and result.
+
+Each SpecializedAgent has a role, an L L M client, and tools specific to that role. When executing a task, the agent uses a role-specific system prompt. For example, the researcher prompt says "You are a research specialist. Your job is to gather information from available sources. Be thorough and cite sources." The writer prompt emphasizes creating clear, engaging content. The reviewer prompt focuses on checking facts, grammar, and completeness.
+
+The execute method enters a loop where it calls the L L M with tool definitions, executes any tools the L L M wants to call, and continues until the L L M returns a final answer without tool calls.
+
+The MultiAgentOrchestrator manages all the specialized agents. You register agents with it, and then execute workflows by specifying a sequence of agent roles. For each role in the workflow, the orchestrator gets that agent, creates a stage-specific task description, executes the agent, saves the result, and updates the shared context with the output. The next agent in the workflow can see the previous agents' outputs in its context.
+
+For example, if the user asks to "Write a blog post about A I safety," you might execute a workflow with three stages: RESEARCHER, WRITER, then REVIEWER. The researcher gathers information, the writer creates content based on that research, and the reviewer checks the quality. Each stage builds on the previous one.
+
+Let's discuss trade-offs. For quality, you get specialized expertise for each task, but coordination becomes more complex. For debuggability, you have clear stage boundaries, but it's harder to trace errors across agents. For cost, you only use the agents you need, but there are multiple L L M calls overall. For latency, you can parallelize independent agents, but the default is sequential execution.
+
+When should you use multi-agent architectures? They're ideal for complex workflows, when you need quality checks, and when different skills are required. When should you not use them? Avoid them for simple tasks, tight latency budgets, or cost-sensitive applications.
+
+Guardrails and Safety
+
+The problem is that agents can go off the rails in production. They can enter infinite loops, incur excessive costs, perform dangerous actions, or try to call hallucinated tools that don't exist.
+
+The solution is multiple layers of protection. You implement resource limits like maximum cost, latency, and iterations using counter tracking. You set tool restrictions with allowlists and blocking dangerous operations through pre-execution checks. You validate inputs to prevent things like S Q L injection or prompt injection using regex patterns and custom validators. You filter outputs to remove personally identifiable information or toxic content through post-processing.
+
+Let me explain the implementation. First, you define a GuardrailViolation exception that's raised when a rule is violated. Then you create an AgentGuardrails class that tracks limits for maximum iterations, maximum cost in cents, maximum latency in seconds, maximum tool calls, and an optional allowlist of permitted tools.
+
+The class maintains runtime tracking counters for iteration count, total cost in cents, start time, and tool call count. When starting a run, all counters are reset and the start time is recorded. Before each iteration, you call check iteration to increment and verify the iteration counter. After each L L M call, you call check cost with the cost of that call. Before and after tool execution, you call check latency to ensure you haven't exceeded the time limit. Before executing any tool, you call check tool call to verify the tool is in the allowlist and you haven't exceeded total tool call limits.
+
+You can also validate tool arguments against custom rules. For example, you might have a validator for S Q L queries that checks for dangerous keywords like DROP, DELETE, TRUNCATE, ALTER, and CREATE, and blocks queries containing them. Or you might have a validator for bulk email that limits the number of recipients to 100 per call to prevent abuse.
+
+The SafeAgent class wraps all this together. It takes an L L M client, tools, and guardrails configuration. When running, it checks limits before each iteration and after each L L M call. If a GuardrailViolation is raised, it returns an error response with details about which rule was violated. All tool executions are wrapped in error handling that returns J S O N error objects rather than crashing.
+
+When should you use guardrails? They're essential for all production agents, user-facing applications, and high-stakes operations. When might you skip them? Only in fully controlled environments, internal testing, or with fully trusted users.
+
+Evaluation and Testing
+
+The problem with evaluating agents is that they're non-deterministic. Traditional unit tests that expect exact outputs will fail. So how do you know if your changes improve or break behavior?
+
+The solution is a multi-faceted evaluation approach. You create test cases that specify not just expected outputs, but also expected tools that should be called, expected outcomes like success or error, maximum cost budgets, and maximum latency budgets.
+
+Let me walk through the implementation. You define a TestCase data class with an I D, input query, and various optional expectations. You define an EvalResult data class that captures whether the test passed, what actually happened, costs, latency, and any errors.
+
+The AgentEvaluator class takes an agent to test and optionally an L L M judge for semantic evaluation. The evaluate method runs all test cases and aggregates results. For each test, it executes the agent, measures cost and latency, and checks multiple dimensions.
+
+First, it checks the expected outcome. If the test expects success, but there were errors, it fails. If it expects an error but succeeded, it also fails. Second, it checks expected tools. If the set of tools actually called doesn't match the expected set, it fails. Third, it checks the cost budget. If the actual cost exceeds the maximum, it fails. Fourth, it checks the latency budget. If execution took too long, it fails. Fifth, if an expected output is provided, it checks semantic correctness.
+
+For semantic correctness, you can use an L L M as a judge. You give it both the expected and actual outputs and ask if they're semantically equivalent. This handles cases where the wording differs but the meaning is the same.
+
+The evaluator aggregates all results into a summary with pass rate, total tests, passed and failed counts, total cost, average latency, and details of failed tests.
+
+You should evaluate on multiple dimensions. For correctness, use an L L M judge or exact match. For tool usage, compare tool traces. For efficiency, track token and cost usage. For latency, measure response time. For reliability, calculate the success to failure ratio. For safety, log guardrail violations.
+
+When should you use evaluation? For all production agents, before deployments, and when A B testing different variants. When might you skip it? During exploratory prototyping, but you should add it before production.
+
+Framework Comparison
+
+Let me compare the major agent frameworks. LangChain has a rich ecosystem with many integrations and an active community, but it has heavy abstraction, a complex A P I, and version instability. It's best for rapid prototyping and standard use cases. LlamaIndex has excellent R A G support with many data connectors and query engines, but it's less flexible for custom agents and more opinionated. It's best for document Q and A and knowledge bases. AutoGPT focuses on autonomous task execution with ambitious goals, but it's unreliable, can enter expensive loops, and is hard to control. It's best for experimental work and research. Custom implementations give you full control, minimal dependencies, and are debuggable, but require more code to write and maintain. They're best for production systems with specific requirements.
+
+Here's a simple decision tree for choosing a framework. If you need R A G plus document processing, choose LlamaIndex. If you're building a standard chatbot with tools, choose LangChain. If you're building a production system with specific requirements, go with a custom implementation. If you're doing research or experimentation, consider AutoGPT or a custom approach.
+
+Key Concepts Checklist
+
+Let's review the key concepts you should understand. First, you should be able to explain the ReAct pattern, which alternates between reasoning and acting in a loop. Second, you should know how to implement function calling with structured outputs using modern L L M A P Is. Third, you should be able to design a memory system with working, short-term, and long-term storage. Fourth, you should understand how to architect multi-agent workflows with specialization where different agents handle different tasks. Fifth, you should know how to implement guardrails for cost, latency, and tool restrictions. Sixth, you should be able to build an evaluation framework using L L M judges for semantic comparison. Seventh, you should be able to compare LangChain versus LlamaIndex versus custom agents. And finally, you should know when not to use agents, such as for simple tasks or latency-critical applications.
+
+Practical Insights
+
+Let me share some practical insights from production experience. First, cost control is critical. You need to track costs per request in production. Set hard limits between 10 cents and one dollar per agent run for most use cases. Monitor token usage carefully because context size grows quickly with memory. Here's a concrete example: if you have 10,000 requests per day at 50 cents per request, that's $5,000 per day, which equals $150,000 per month. A good strategy is to use cheaper models for tool selection and expensive models only for final generation.
+
+For latency optimization, avoid sequential tool calls. The bad pattern is looping over 100 customers and calling send email for each one individually, which results in 100 L L M calls. A better approach is to use batch operations with a single send bulk email call. The best approach is parallel execution using async functions and gather to run multiple agent queries simultaneously.
+
+For debugging agent behavior, always log the full execution trace including thoughts, actions, and observations. Use deterministic L L M settings with temperature set to zero when debugging to get consistent behavior. Create reproduction test cases for every failure you encounter. Monitor tool call patterns because loops or repeated calls indicate issues.
+
+In your logging, include structured information for each iteration: the iteration number, the thought, the action taken, the arguments, the observation, the cost so far, and the elapsed latency.
+
+Now let's talk about when not to use agents. Don't use agents for simple single-tool calls. For those, use direct function calling without the agent loop. Don't use agents when latency must be under 1 second. Instead, pre-compute results or use traditional rule-based systems. Don't use agents when you need fully deterministic behavior. Use traditional code instead. Don't use agents for cost-sensitive high-volume applications. Agents are expensive per request. And don't use agents in heavily regulated domains where explainability and audit trails are challenging.
+
+For error handling, remember that tool failures are common, so implement retries with exponential backoff. L L Ms hallucinate tool names, so validate before execution. Infinite loops do happen, so always set maximum iteration limits. Implement graceful degradation to return partial results on timeout rather than complete failure.
+
+Here's an example of robust tool execution. Your execute tool with retry function accepts a tool name, arguments, and maximum retry count. For each attempt, you try to execute the tool. If a ToolExecutionError occurs, you check if this was the last retry. If so, you return an error object with recoverable set to false. Otherwise, you sleep for 2 to the power of the attempt number for exponential backoff, and try again.
+
+Finally, here's a production deployment checklist. First, ensure guardrails are configured for cost, latency, and iterations. Second, verify that all tools have input validation. Third, require human-in-the-loop approval for dangerous operations. Fourth, ensure execution traces are logged for debugging. Fifth, confirm your evaluation suite covers edge cases. Sixth, set up monitoring alerts for cost spikes and error rates. And seventh, implement fallback behavior for when agents fail completely.
+
+This concludes Chapter 34 on A I Agents and Tool Use. You should now understand the core patterns for building production-ready agentic systems, including the ReAct pattern, function calling, memory systems, multi-agent architectures, guardrails, and evaluation. Remember that agents are powerful but complex, and production readiness requires careful attention to cost, latency, safety, and reliability.

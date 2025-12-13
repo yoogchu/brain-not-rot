@@ -1,0 +1,171 @@
+Chapter 16: Rate Limiting and Load Shedding
+
+Why Rate Limit?
+
+Let me paint you a picture of what happens without rate limiting. Imagine your service is running normally, handling around 1,000 requests per second. Everything is smooth. Then someone with millions of followers tweets a link to your API. Suddenly, you're getting 100,000 requests per second. Your database becomes completely overloaded, which triggers a cascading failure, and soon you have a complete outage. The worst part? One misbehaving client has now taken down your service for all users.
+
+Rate limiting protects your system from several critical threats. First, traffic spikes from viral content or news events. Second, misbehaving clients that might have bugs or infinite loops. Third, malicious actors attempting distributed denial of service attacks or scraping your data. And finally, cascading failures where one overloaded service spreads the problem throughout your entire system.
+
+Rate Limiting Algorithms
+
+Let's explore the main rate limiting algorithms you'll encounter in production systems.
+
+Token Bucket
+
+The token bucket algorithm is best understood through a simple analogy. Imagine you have a bucket that holds tokens, and this bucket fills with tokens at a steady rate. Let's say your bucket can hold a maximum of 10 tokens, and it refills at a rate of 1 token per second.
+
+Here's how it works. The bucket has a defined capacity, let's say 10 tokens. It refills at a steady rate, like 1 token per second. At any given moment, the bucket might have some number of tokens available, perhaps 7 tokens.
+
+When a request arrives, the system checks if tokens are available. If there are tokens, the system takes one token from the bucket and processes the request. If there are no tokens remaining, the request is rejected with an HTTP 429 status code, which means "Too Many Requests."
+
+Let me walk you through a Python implementation. We create a TokenBucket class with three parameters: capacity for the maximum number of tokens, refill rate for how many tokens are added per second, and we track the current number of tokens and the last time we refilled.
+
+The refill method is crucial. It calculates how much time has elapsed since the last refill, multiplies that by the refill rate to determine how many tokens to add, then adds those tokens while ensuring we never exceed the bucket's capacity. Finally, it updates the last refill timestamp.
+
+The allow request method first calls refill to add any new tokens, then checks if we have enough tokens available. If we do, it subtracts the needed tokens and returns true to allow the request. Otherwise, it returns false to reject the request.
+
+Here's how you'd use it in practice. You create a bucket with a capacity of 10 tokens and a refill rate of 1 token per second. This gives you a burst capacity of 10 requests immediately, with a sustained rate of 1 request per second. When a request comes in, you check if the bucket allows it. If yes, process the request. If no, return a 429 Too Many Requests response.
+
+The token bucket has some key characteristics. It allows bursts up to the bucket capacity, which is useful for handling legitimate spikes. It smooths traffic to the refill rate over time, preventing sustained overload. And it's very memory efficient, storing just a few numbers per client.
+
+Token bucket is commonly used for API rate limiting and network traffic shaping. It strikes a good balance between allowing legitimate bursts while preventing sustained abuse.
+
+Leaky Bucket
+
+The leaky bucket algorithm works differently. Imagine requests entering a queue, which we call the bucket. This bucket processes requests at a fixed rate, regardless of how fast they arrive.
+
+Picture it like this. Requests arrive at a variable rate from clients. They enter a queue, which is the bucket, where they wait. The bucket processes requests at a constant rate, like water leaking from a bucket at a steady drip. For example, it might process exactly 1 request per second.
+
+The key characteristic is that the output rate is constant. Even if 100 requests arrive in the same instant, they'll be processed at the fixed rate. This smooths out bursts completely. Requests wait in the queue until they can be processed. If the queue overflows because too many requests are waiting, new requests are rejected.
+
+Leaky bucket is particularly useful for traffic shaping and ensuring a constant processing rate. It's often used when you need predictable, consistent throughput rather than allowing bursts.
+
+Comparing Token Bucket and Leaky Bucket
+
+These two algorithms have important differences. When it comes to handling bursts, token bucket allows them up to the bucket capacity, while leaky bucket smooths them out completely. The output rate for token bucket is variable, up to the burst limit, while leaky bucket maintains a constant rate. Token bucket is implemented with simple counters, while leaky bucket requires maintaining a queue. This means token bucket uses less memory, while leaky bucket uses more memory to store the queue.
+
+Fixed Window Counter
+
+The fixed window counter is simpler but has a critical flaw. You count requests in fixed time windows. For example, if your window is 1 minute and your limit is 100 requests, you might see 45 requests from 10:00 to 10:01, which is under the limit. Then 78 requests from 10:01 to 10:02, still under the limit. Then 102 requests from 10:02 to 10:03, which exceeds the limit, so you reject 2 requests.
+
+The problem is what we call the boundary burst. Let's say your limit is 100 requests per minute. A clever or unlucky client sends 100 requests between 10:00:30 and 10:00:59, which is near the end of the window. Those all succeed. Then they send another 100 requests between 10:01:00 and 10:01:29, which is the start of the next window. Those all succeed too. The result? 200 requests in 1 minute, even though each individual window was under the limit. This is a significant weakness.
+
+Sliding Window Log
+
+The sliding window log algorithm solves the boundary burst problem by tracking the exact timestamp of every request. Here's how it works in Python.
+
+You create a class that stores the limit and window duration in seconds. For each client, you maintain a list of timestamps when they made requests. When a new request arrives, you first calculate the window start time by subtracting the window duration from the current time. Then you filter the client's timestamp list to remove any timestamps older than the window start. If the number of remaining timestamps exceeds the limit, you reject the request. Otherwise, you add the current timestamp and allow the request.
+
+The advantages are clear: it's perfectly accurate with no boundary issues. The disadvantage is the high memory usage because you're storing every single timestamp for every client.
+
+Sliding Window Counter
+
+The sliding window counter is a clever hybrid approach that balances accuracy and memory usage. It uses a weighted average of the current window and the previous window.
+
+Here's an example. The current window is from 10:01 to 10:02, and so far you've received 40 requests. The previous window was from 10:00 to 10:01, which had 60 requests total. The current time is 10:01:30, meaning you're 50% through the current window.
+
+The weighted count calculation works like this. You multiply the previous window's count by the percentage of the current window that has NOT elapsed. So the previous window count of 60 is multiplied by 0.5, giving 30. Then you add the current window count of 40. The total weighted count is 70 requests.
+
+This approach provides the best balance of accuracy versus memory usage, making it popular in production systems.
+
+Distributed Rate Limiting
+
+Single server rate limiting is straightforward, but distributed rate limiting introduces significant challenges.
+
+The Problem
+
+Here's the problem. Suppose a user has a rate limit of 100 requests per minute. You have three servers handling requests. Server 1 receives 40 requests from this user. Server 2 receives 35 requests. Server 3 receives 45 requests. Each server independently thinks the user is under the limit because each server only sees their portion of the traffic. But when you add it up, that's 120 requests per minute, which exceeds the limit.
+
+Solution 1: Centralized Counter with Redis
+
+The most common solution is using Redis as a centralized counter. Here's how it works in Python.
+
+You create a function that takes the client ID, the limit, and the window duration in seconds. You generate a key based on the client ID and the current time window. Then you use Redis's pipeline feature to atomically increment the counter and set an expiration time. After executing the pipeline, you check if the count is within the limit.
+
+The advantages are that it's accurate and consistent across all servers. The disadvantages are that Redis latency is added to every request, and Redis becomes a single point of failure for your rate limiting system.
+
+Solution 2: Local Rate Limiting with Sync
+
+An alternative approach does local rate limiting with periodic synchronization. You maintain local counters on each server for fast checking. When a request arrives, you do a fast local check. If the local count exceeds the limit by some buffer, perhaps 10%, you reject immediately. Otherwise, you increment the local count and allow the request.
+
+Then, in a background process that runs every second, you sync the local counts to Redis. You increment Redis counters with the accumulated local counts, then clear the local counters.
+
+This trades accuracy for speed. It's less precise but much faster because most requests don't hit Redis.
+
+Solution 3: Sticky Sessions
+
+The third approach is using sticky sessions, where you route the same client to the same server consistently. Client A always goes to Server 1, Client B always goes to Server 2, and so on. This makes local rate limiting work correctly because each client's traffic goes through a single server.
+
+This works with IP hash-based routing or cookie-based routing. The trade-off is reduced load balancing flexibility.
+
+Circuit Breaker Pattern
+
+The circuit breaker pattern protects your system when downstream services fail. When a downstream service starts failing, the circuit breaker stops sending requests to it, preventing you from hammering a failing service.
+
+Circuit Breaker States
+
+The circuit breaker has three states. In the CLOSED state, everything is working normally, and the breaker is tracking failures. In the OPEN state, all requests are immediately rejected with a fast fail response. In the HALF-OPEN state, the breaker allows one test request through to check if the service has recovered.
+
+Here's how the transitions work. The circuit starts CLOSED. When failures exceed a threshold, it transitions to OPEN. After a timeout period, it transitions to HALF-OPEN. If the test request succeeds, it transitions back to CLOSED. If the test request fails, it transitions back to OPEN.
+
+Circuit Breaker Implementation
+
+Let me walk you through a Python implementation. The CircuitBreaker class takes a failure threshold and recovery timeout. It tracks the number of failures, the current state starting as CLOSED, and the timestamp of the last failure.
+
+The call method wraps calls to external services. If the state is OPEN, it checks if enough time has passed to try a HALF-OPEN state. If not enough time has passed, it raises a CircuitOpenError immediately without calling the service.
+
+The method then attempts to call the function. If it succeeds, it calls on_success, which resets the failure count to zero and sets the state to CLOSED. If it fails, it calls on_failure, which increments the failure count and records the failure time. If failures exceed the threshold, the state transitions to OPEN.
+
+Here's how you use it. You create a breaker with a failure threshold of 5 failures and a recovery timeout of 30 seconds. When you want to call an external service, you wrap the call in the breaker's call method. If the circuit is open, you catch the CircuitOpenError and use a fallback, like returning cached data instead.
+
+Load Shedding
+
+Load shedding is the practice of intentionally dropping requests when your system is overloaded to protect it from complete failure.
+
+Priority-Based Shedding
+
+Here's a Python example of priority-based load shedding. When a request arrives, you first check the current system load. If the load is above 90% capacity, you only serve requests marked as critical priority. Everything else gets a 503 Service Unavailable response. If the load is above 80% capacity, you shed low priority requests but still serve critical and high priority ones. If the load is below 80%, you process all requests normally.
+
+What constitutes different priorities? Critical priority might be payment processing, which absolutely cannot fail. High priority could be user-facing reads, which directly impact user experience. Medium priority might be background syncs that can be delayed. Low priority could be analytics or logging, which are important but not time-sensitive.
+
+Rate Limit Response Design
+
+When you rate limit a request, your response should be informative and helpful.
+
+Response Headers
+
+The HTTP response should have a 429 Too Many Requests status code. You should include several standard headers. The X-RateLimit-Limit header tells the client the maximum requests allowed in the window. The X-RateLimit-Remaining header tells them how many requests they have left in the current window. The X-RateLimit-Reset header provides a Unix timestamp for when the window resets. The Retry-After header tells the client how many seconds to wait before retrying.
+
+The response body should include a clear error message. It should have an error code like "rate_limit_exceeded", a human-readable message such as "Too many requests. Please retry after 30 seconds," and the retry_after duration in seconds.
+
+Rate Limiting by Dimension
+
+You can apply rate limits across multiple dimensions to create a comprehensive protection strategy.
+
+By Client or User
+
+You can rate limit by API key, using a limit key like "ratelimit:apikey:" followed by the API key. You can rate limit by user ID for authenticated users, using "ratelimit:user:" followed by the user ID. For anonymous users, you can rate limit by IP address, using "ratelimit:ip:" followed by the client IP.
+
+By Endpoint
+
+Different endpoints have different costs, so they should have different limits. For example, a search endpoint might be expensive and limited to 10 requests per minute. A users endpoint might be normal cost and allow 100 requests per minute. A health check endpoint is cheap and can allow 1,000 requests per minute.
+
+By Plan or Tier
+
+You can vary limits based on the customer's subscription tier. A free plan might allow 100 requests per minute. A starter plan allows 1,000. A pro plan allows 10,000. An enterprise plan allows 100,000.
+
+Key Concepts Checklist
+
+Let me summarize the key concepts you should understand. First, choose the appropriate algorithm. Token bucket works well for API rate limiting. Sliding window is better when you need accuracy. Second, design for distributed environments. You can use Redis for accuracy or accept some approximation with local limiting. Third, define your rate limit dimensions, whether by user, IP address, endpoint, or plan. Fourth, implement a circuit breaker to protect downstream services. Fifth, plan your load shedding strategy for when the system is overloaded. Sixth, design informative rate limit responses that help clients understand and recover.
+
+Practical Insights
+
+Let me share some practical insights from running these systems in production.
+
+First, remember that rate limiting is business logic, not just technical infrastructure. Work with your product team to define appropriate limits. Different customer tiers should have different limits based on what they're paying for. Monitor actual usage patterns and adjust limits based on real data, not assumptions.
+
+Second, implement defense in depth with multiple layers of rate limiting. At the edge or CDN level, apply coarse, fast rate limiting to block obvious abuse. At the API Gateway level, implement per-route rate limiting. At the application level, implement fine-grained per-user rate limiting.
+
+Third, circuit breaker tuning is critical and challenging. If your circuit breaker is too sensitive, it will flap open and closed, creating instability. If it's too lenient, it won't provide adequate protection. Start with conservative settings and adjust based on observed data from your production system. Monitor the circuit breaker state transitions and failure rates to find the right balance for your specific services and traffic patterns.
+
+This concludes Chapter 16 on Rate Limiting and Load Shedding.

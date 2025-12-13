@@ -1,0 +1,229 @@
+Chapter 35: Machine Learning System Design Patterns
+
+Why Machine Learning Systems Are Different
+
+Imagine your recommendation model works perfectly in Jupyter notebooks. You deploy it to production. On day one, you see ninety-five percent accuracy with fifty millisecond p99 latency. By day thirty, accuracy has dropped to eighty-seven percent and latency has increased to two hundred milliseconds p99. By day sixty, the model serving crashes with out-of-memory errors.
+
+What changed? Everything changed. User behavior shifted, causing data drift. Model predictions affected user behavior, creating feedback loops. Feature computation slowed down, creating training-serving skew. And there was no rollback strategy when accuracy dropped.
+
+Machine learning systems fail in ways traditional software doesn't. You need infrastructure that treats models as first-class citizens, handles data drift, and supports experimentation at scale.
+
+Feature Stores
+
+The Problem
+
+Your training pipeline computes features from raw data. Six months later, your serving code reimplements the same logic. The implementations diverge. Training uses total purchases divided by days active, but serving uses total purchases divided by days since signup. Accuracy tanks in production.
+
+Training-serving skew is the number one killer of machine learning systems.
+
+How Feature Stores Work
+
+A feature store acts as a centralized repository that sits between your data sources and both training and serving systems. Think of it as having two main components: offline features and online features.
+
+Offline features are stored in batch systems like S3, GCS, or Snowflake. They have latency measured in minutes and are used primarily for training. These systems store full historical data, often in the terabyte to petabyte range, and are optimized for storage costs.
+
+Online features, on the other hand, are stored in fast key-value stores like Redis or DynamoDB. They have latency under ten milliseconds p99 and are used for real-time serving. These systems store recent snapshots, typically in the gigabyte range, and are optimized for low latency.
+
+The key insight is this: you define features once in a shared feature definition layer, typically using Python or SQL, and then materialize those features for both training and serving. This eliminates the training-serving skew problem.
+
+Implementation Example
+
+Let me walk through how you'd implement this using Feast, a popular open-source feature store. First, you define an entity, which represents what your features are about. For example, you might have a user entity identified by user ID.
+
+Then you define a feature view, which specifies how to compute features. For a user activity feature view, you might define features like total purchases as an integer, average purchase amount as a float, and days since last purchase as an integer. You'd point this to a data source and specify a TTL, or time-to-live, which defines the feature freshness requirement.
+
+When training, you use the feature store to get historical features. You provide an entity dataframe with user IDs and timestamps, and the feature store returns point-in-time correct features for training. This is crucial because it ensures you're not leaking future information into your training data.
+
+When serving, you get real-time features by providing entity rows with user IDs, and the feature store quickly returns the latest feature values from the online store.
+
+Offline versus Online Features
+
+Let me compare offline and online features across several dimensions. For storage, offline features use data warehouses like Snowflake or BigQuery, while online features use key-value stores like Redis or DynamoDB. For latency, offline features take minutes to hours, while online features return in under ten milliseconds p99. For data volume, offline features store the full history in terabytes or petabytes, while online features store recent snapshots in gigabytes. For use cases, offline features are used for training and backtesting, while online features are used for real-time serving. And for cost, offline features are optimized for storage, while online features are optimized for latency.
+
+When should you use feature stores? Use them when you have multiple models sharing features, when you need point-in-time correctness for training, when training-serving skew is a problem, or when your team has more than three machine learning engineers.
+
+When should you not use feature stores? Don't use them if you have a single model with simple features, if features are model-specific, if you have a small team in early stages, or if you need real-time feature computation where streaming would be better.
+
+Model Serving Patterns
+
+Pattern One: Batch Prediction
+
+In batch prediction, you have input data stored in S3 or HDFS. A model runs as a Spark job, processes all the data, and writes predictions to a database. Then your application reads from this cache of pre-computed predictions. This is typically scheduled to run every hour or every day, and predictions are ready in minutes or hours.
+
+Here's how you'd implement this. You load your model from a model registry like MLflow. Then you read input data using PySpark. You apply the model to all users in the dataset. Finally, you write the predictions to a database using JDBC, typically in overwrite mode to replace the previous batch of predictions.
+
+When should you use batch prediction? Use it when you can pre-compute predictions for known entities, like all users or all products. When should you not use it? Don't use it when you need predictions for new or unknown entities in real-time.
+
+Pattern Two: Real-time Prediction
+
+In real-time prediction, an HTTP request comes in to a model API, typically built with FastAPI. The API loads the model into memory and returns a response in JSON format. The latency is under one hundred milliseconds p99, and throughput can handle thousands of queries per second.
+
+Let me walk through an implementation. You create a FastAPI application and load the model once at startup using an event handler. This is important for performance because loading the model on every request would be too slow. You define request and response models using Pydantic for validation. Then in your prediction endpoint, you prepare the features from the request, get the prediction from the model, apply any business logic, and return the response.
+
+For scaling considerations, you might use a model server with batching to achieve higher throughput. Ray Serve is a good option for this. You create a deployment with multiple replicas and set a maximum concurrent queries limit. Ray Serve can handle batching automatically, which improves throughput when you have many requests coming in.
+
+When should you use real-time prediction? Use it for user-facing predictions, dynamic inputs that can't be pre-computed, or fraud detection where you need immediate results. When should you not use it? Don't use it when you can pre-compute predictions or when latency over one second is acceptable.
+
+Pattern Three: Streaming Prediction
+
+In streaming prediction, input events come from Kafka, are processed by a Flink job that includes the model, and output predictions are written back to Kafka. The Flink job maintains state for features. Latency is under one second, and throughput can handle millions of events per day.
+
+Here's an implementation using Kafka Streams. You load your model once at startup. You set up a Kafka consumer to read from the user events topic and a producer to write predictions. You maintain stateful processing, tracking user state like clicks and impressions. In production, you'd use Flink state or Redis instead of in-memory dictionaries. For each incoming event, you update the user state, compute features like click rate, run the model to get a prediction, and emit the prediction to an output Kafka topic.
+
+When should you use streaming prediction? Use it for event-driven predictions, when you need stateful features computed from event streams, or for IoT and time-series applications. When should you not use it? Don't use it for simple request-response patterns or when you don't have event stream infrastructure.
+
+A/B Testing for Machine Learning Models
+
+The Problem
+
+You trained a new model with two percent higher offline accuracy. You deploy it to all users. Engagement drops five percent. Why? Because offline metrics don't always correlate with business metrics. This is a fundamental challenge in machine learning systems.
+
+Multi-Armed Bandit Pattern
+
+The multi-armed bandit pattern uses a traffic splitter with Thompson Sampling. Traffic is split between multiple models, say Model A gets fifty percent, Model B gets thirty percent, and Model C gets twenty percent. As predictions are served, you collect rewards like clicks or purchases. Based on these rewards, you update the traffic split using Bayesian updates. This allows the system to automatically allocate more traffic to better-performing models.
+
+Here's how you implement this. You create a Thompson Sampling A/B test class that maintains Beta distribution parameters for each model, with alpha and beta both starting at one. To select a model for a given request, you sample from each model's Beta distribution and choose the model with the highest sample. After serving a prediction, you update based on the reward. If the user clicked or purchased, that's a success, so you increment alpha. Otherwise, you increment beta.
+
+You can get statistics on current performance estimates by calculating the mean and standard deviation from the Beta distribution parameters. For example, after running for a while, you might see model version one has a mean of zero point four five, model version two has a mean of zero point five two, and model version three has a mean of zero point four. This tells you that model version two is performing best.
+
+Shadow Mode Testing
+
+In shadow mode testing, every request goes to the production model, which returns results to the user. But the request is also sent to a shadow model, which computes predictions but doesn't return them to users. The predictions from both models are logged and compared in a metrics dashboard.
+
+When should you use shadow mode? Use it to validate a new model before affecting users. When should you use A/B testing? Use it when you're ready to test the impact on business metrics with real users.
+
+Model Versioning and Registry
+
+The Problem
+
+Picture this conversation. Engineer one asks, "Which model is in production?" Engineer two responds, "The one from last week? Or the retrained one?" Engineer three adds, "I can't reproduce the version two results."
+
+This illustrates common problems: no source of truth for model versions, no way to rollback when version three fails, and can't reproduce training runs.
+
+Model Registry Architecture
+
+A model registry provides a centralized place to track all versions of a model. For a fraud detection model, you might have version one in staging with accuracy of zero point nine two, version two in production with accuracy of zero point nine four, and version three archived with accuracy of zero point nine one.
+
+For each version, the registry stores metadata including the training run ID, hyperparameters used, the version of training data, metrics from evaluation, and model artifacts like weights and configuration files.
+
+Implementation with MLflow
+
+Let me walk through an implementation. When you start a training run, you log parameters like the number of estimators, max depth, and the data version. You train your model, then log metrics like accuracy and precision. You log the trained model with a registered model name. MLflow automatically versions this for you.
+
+To promote a model to production, you use the MLflow client to transition the model version stage. For example, you might transition version three to the Production stage. Then when serving, you load the production model by specifying the model name and the Production stage, and MLflow automatically gives you the correct version.
+
+Model Stages
+
+Let me explain the different model stages. The None stage is for newly registered models, and training jobs can write to this. The Staging stage is for testing and validation, and ML engineers can write to this. The Production stage is for live serving, and only deployment automation should write to this. The Archived stage is for deprecated models, and anyone can archive old models.
+
+Training Pipelines
+
+The Problem
+
+Training a model involves many steps: data extraction, validation, preprocessing, feature engineering, training, evaluation, and registration. Doing this manually is error-prone. You need reproducible, scheduled pipelines.
+
+Pipeline Architecture
+
+A training pipeline is structured as a directed acyclic graph, or DAG. The flow goes like this: First, you extract data from a data warehouse like BigQuery. Then you validate the data using a tool like Great Expectations. Next, you perform feature engineering. Then you train the model. After training, you evaluate the model. Finally, if evaluation passes, you register the model.
+
+Kubeflow Pipelines Implementation
+
+Let me walk through a Kubeflow Pipelines implementation. You define each step as a component. For extracting data, you create a component that reads from a data warehouse and writes to a file. For validating data, you create a component that uses Great Expectations to define expectations like columns should not be null and age should be between zero and one hundred twenty. For training the model, you create a component that loads data, trains a model, saves it, and logs metrics.
+
+Then you tie these together in a pipeline definition. You create an extract task, a validate task that depends on the extract output, and then conditionally, if validation passes, you create a train task.
+
+When should you use Kubeflow? Use it if you're Kubernetes-native, have complex pipelines, and your team has Kubernetes expertise. When should you use MLflow Projects? Use it for simpler scenarios, git-based workflows, and less infrastructure overhead.
+
+Data Pipelines for Machine Learning
+
+Feature Engineering at Scale
+
+The data flow for feature engineering at scale starts with raw events from Kafka. These go through stream processing using Flink or Spark, where you perform windowing, aggregations, and joins. The processed features are written to a feature store with both offline and online storage. From there, the features are used for training, batch prediction, and real-time serving.
+
+Here's how you'd implement feature engineering with Spark. You read raw events from S3 in Parquet format. You define a window for aggregations, for example, partitioning by user ID and ordering by timestamp, with a range of the last twenty-four hours. Then you compute various features: count features like total events and total purchases, time-based features like days since last event, windowed aggregations like average purchase amount over the last thirty days, and category features like the set of purchased categories. Finally, you write these features to the feature store.
+
+Monitoring Machine Learning Models
+
+The Problem
+
+Imagine this scenario. In week one, model accuracy is ninety-four percent. By week four, it's dropped to eighty-nine percent. By week eight, it's down to seventy-six percent. What happened?
+
+Several things could have gone wrong. User behavior changed, causing data drift. Feature distributions shifted. There might be bugs in feature computation. Or feedback loops could have corrupted the training data.
+
+Types of Drift
+
+Let me explain the different types of drift you need to monitor.
+
+Data drift is when the input distribution changes. You can detect this using statistical tests like the Kolmogorov-Smirnov test. This test compares the distribution of a feature in your training data versus production data. If the p-value is below a threshold like zero point zero five, you alert that drift has been detected.
+
+Model drift is when model performance degrades over time. You track model metrics like accuracy, precision, and recall over time, writing them to a monitoring system like Prometheus. If accuracy drops below a threshold, for example below eighty-five percent, you send an alert.
+
+Prediction drift is when the output distribution changes. For example, during training, thirty percent of predictions were positive class. In week one of production, thirty-two percent are positive, which is normal variation. But by week four, sixty-eight percent are positive, which indicates drift. This can be caused by changes in input data, a model bug, or a feature engineering bug.
+
+Monitoring Dashboard
+
+A good monitoring dashboard tracks several key metrics. For accuracy, you might alert if it drops below ninety percent. For data drift on different features, you alert if the p-value is less than zero point zero five. For prediction positive rate, you might alert if it exceeds forty percent. And for latency p99, you might alert if it exceeds two hundred milliseconds.
+
+Machine Learning Platform Comparison
+
+Let me compare the major machine learning platforms.
+
+MLflow is best for small to medium teams using open-source tools. Its strengths are simplicity, flexibility, and a good model registry. Its weaknesses are that it doesn't provide managed training infrastructure. And it's free since it's open source.
+
+Kubeflow is best for Kubernetes-native teams. Its strengths are deep Kubernetes integration and pipeline orchestration. Its weaknesses are complex setup and a steep learning curve. The cost is just your infrastructure costs.
+
+SageMaker is best for AWS shops. Its strengths are managed infrastructure and AutoML capabilities. Its weaknesses are vendor lock-in and high cost. It's the most expensive option.
+
+Vertex AI is best for GCP shops. Its strengths are integration with Google Cloud Platform and AutoML. Its weaknesses are vendor lock-in. It's moderately expensive.
+
+The choice between these comes down to your team's expertise and existing infrastructure.
+
+Key Concepts Checklist
+
+Here are the key concepts you should be able to discuss in a Staff-plus level interview.
+
+First, you should be able to design a feature store for training-serving consistency. Second, you should know how to choose a serving pattern, whether batch, real-time, or streaming, based on latency needs. Third, you should be able to implement A/B testing or shadow mode for model validation. Fourth, you should understand how to use a model registry for versioning and rollback capability. Fifth, you should know how to build reproducible training pipelines. Sixth, you should be able to monitor for data drift, model drift, and prediction drift. Seventh, you should be able to calculate infrastructure costs for both training and serving. And eighth, you should have a plan for rollback strategy when models fail.
+
+Practical Insights
+
+Feature Store or Not
+
+Here's my guidance on when to build a feature store. If you have a single model with simple features, don't build a feature store yet. If you have multiple models, multiple teams, and training-serving skew problems, then invest in a feature store. My rule of thumb is: if you have more than three machine learning engineers, the return on investment for a feature store is positive.
+
+Training-Serving Skew Is Inevitable
+
+Training-serving skew is almost inevitable if you're not careful. Here's a common example. In training code written in Python with Pandas, you might compute average purchase as a grouped mean. Six months later, a different engineer writes serving code in SQL that computes average purchase as sum divided by count. But this handles nulls differently, creating a bug.
+
+The prevention is to generate serving code from training code, or use tools like Feast or Tecton that provide shared feature computation libraries.
+
+Model Rollback Strategy
+
+Always keep the previous model version warm in production. You might have a current model running version three, a previous model running version two, and a fallback model running version one that's known to be stable. Then use a feature flag for instant rollback. If the feature flag is enabled, use the current model. Otherwise, use the previous model. This allows you to rollback in seconds if something goes wrong.
+
+Machine Learning Infrastructure Costs
+
+Let me put infrastructure costs in perspective. Training might cost five hundred dollars per month since it's periodic and uses GPU instances. But serving might cost five thousand dollars per month because it's continuous and handles high queries per second.
+
+This means you should optimize serving first! Use batch predictions where possible, as they're one hundred times cheaper. Use model quantization for four to ten times speedup. And implement caching to avoid redundant predictions.
+
+When to Build versus Buy
+
+Build your own machine learning infrastructure if you have a unique domain where your data is a moat, if you have specific performance requirements, or if you want full control and customization.
+
+Buy existing solutions if you're solving a commodity problem like fraud or recommendations, if you have a small team with fewer than five machine learning engineers, if you need to move fast, or if you don't want to maintain infrastructure.
+
+Data Quality over Model Complexity
+
+Here's a fundamental truth: bad data plus a complex model equals bad predictions. But good data plus a simple model equals good predictions.
+
+Invest in data validation using tools like Great Expectations, feature monitoring, training data versioning, and labeling quality. These investments pay off more than building increasingly complex models.
+
+Shadow Mode Before A/B Test
+
+Follow this sequence when deploying a new model. First, run in shadow mode for one to two weeks. Run the new model in parallel, log predictions but don't serve them to users. Validate that there are no errors, latency is acceptable, and predictions are reasonable. Second, run an A/B test for two to four weeks. Start with five percent of traffic to the new model. Monitor business metrics closely. Gradually increase to fifty percent if things look good. Third, do a full rollout. Send one hundred percent of traffic to the new model, but keep the old model running for potential rollback.
+
+Monitoring Alert Fatigue
+
+Too many alerts equals ignored alerts, which defeats the purpose. Start with critical metrics only. Monitor model accuracy or precision if you have ground truth available. Alert on severe data drift with a p-value less than zero point zero one, not zero point zero five. And monitor serving errors and latency. Add more alerts incrementally based on actual incidents you encounter. Don't try to monitor everything from day one.
+
+This concludes Chapter 35 on Machine Learning System Design Patterns.

@@ -1,0 +1,161 @@
+Chapter 7: Content Delivery Networks and Edge Computing
+
+The Speed of Light Problem
+
+Physics imposes hard limits on latency that no amount of optimization can overcome. Let's start by understanding what this means in practice.
+
+The speed of light in fiber optic cable is approximately two hundred thousand kilometers per second. The distance from New York City to Singapore is about fifteen thousand kilometers. This means the minimum round-trip time, before any server processing whatsoever, is about one hundred and fifty milliseconds.
+
+Consider what this means for user experience. If your server is located in New York City, a user in New York will experience about ten milliseconds round-trip time. A user in London will experience seventy milliseconds. A user in Singapore will experience one hundred and fifty milliseconds or more. And a user in Sydney will experience two hundred milliseconds or more.
+
+Users perceive one hundred milliseconds as sluggish. They perceive one second as broken. This creates a fundamental problem: Singapore users hitting a New York City server will always have a terrible experience. No amount of server optimization can fix physics.
+
+The solution is a Content Delivery Network, or CDN. Instead of serving all content from a single origin server, a CDN caches content at edge locations distributed worldwide. Picture it like this: you have an origin server in New York City. This origin server connects to multiple edge Points of Presence, abbreviated as PoPs. There's an edge PoP in New York City, one in Frankfurt, and one in Singapore. Users in the United States connect to the New York edge, experiencing about ten milliseconds of latency. Users in Europe connect to the Frankfurt edge, experiencing about twenty milliseconds. And users in the Asia-Pacific region connect to the Singapore edge, also experiencing about twenty milliseconds. Instead of everyone making a long journey to New York, users hit nearby edge servers.
+
+CDN Architecture
+
+Points of Presence, or PoPs, are data centers located at network edges worldwide. Let's look at what the major CDN providers offer. Cloudflare operates over three hundred and ten cities. Amazon Web Services CloudFront has over four hundred and ten PoPs. Fastly has over ninety PoPs, but they focus on major metropolitan areas. Akamai has the most extensive network with over four thousand PoPs.
+
+More Points of Presence means being closer to more users, which translates to lower latency.
+
+Let me walk you through how a request flows through a CDN system. First, a user requests an asset, let's say an image file at cdn dot example dot com slash image dot jpg.
+
+Second, DNS resolution occurs. The request goes to cdn dot example dot com, which is controlled by the CDN's DNS servers. The CDN DNS system returns the IP address of the nearest Point of Presence, using geolocation to determine proximity.
+
+Third, the user connects to their nearest PoP.
+
+Fourth, the edge server checks its local cache. At this point, there are two possible paths.
+
+If there's a cache hit, which is the fast path, the edge server returns the cached content immediately. Total latency is around twenty milliseconds.
+
+If there's a cache miss, which is the slow path, the edge server must fetch from the origin server, cache the response locally, and then return it to the user. Total latency for this first request is around two hundred milliseconds.
+
+Fifth, subsequent requests for the same content result in cache hits, bringing us back to the fast twenty millisecond response time.
+
+Modern CDNs have multiple cache layers to optimize this further. At the top, you have the origin server, which is your actual server. Optionally, you can place an origin shield in front of it. This is a single cache layer that sits between all the edge servers and your origin. The origin shield reduces origin load significantly by serving as a unified cache point.
+
+Below the origin shield, you have regional caches. These might include a regional cache for US East, one for EU West, and one for the Asia-Pacific region. Below the regional caches, you have the edge caches themselves. These are distributed across many cities: New York City, Washington DC, London, Frankfurt, Singapore, Tokyo, and so on.
+
+When there's a cache miss at an edge server, it checks the regional cache. If that's a miss, it checks the origin shield. If that's also a miss, only then does it fetch from the origin server.
+
+Caching Strategies
+
+Let's discuss the two main approaches to CDN caching: pull and push.
+
+Pull CDN, also known as on-demand caching, is the most common approach. Content is cached on the first request. Here's how it works for the first request to an image file. The edge cache checks and finds a miss. The regional cache checks and finds a miss. The origin shield checks and finds a miss. The system fetches from the origin server, caches the content at all layers, and returns it to the user. This takes about five hundred milliseconds.
+
+For the second request to the same image file, the edge cache finds a hit and returns the content immediately. This takes about twenty milliseconds.
+
+The advantages of pull CDN are that it's simple to set up - you just point your DNS to the CDN. It only caches content that's actually requested, making it efficient. And cache management is automatic.
+
+The disadvantages are that the first request is always slow due to the cold cache. Your origin server still receives traffic on cache misses. And you may experience cache misses during traffic spikes.
+
+Push CDN, also known as pre-population, works differently. You upload content directly to the CDN. During your deployment process, you generate static assets, upload them to CDN storage which works similarly to Amazon S3, and the CDN distributes these assets to all edges proactively. The content becomes available everywhere immediately, with no first request penalty.
+
+The advantages of push CDN are that there's no cold cache problem. Your origin server is never hit for cached content. And performance is predictable.
+
+The disadvantages are that you must manually manage content. Storage costs are higher. You must handle invalidation explicitly. And this only works for known, static content.
+
+Push CDN is ideal for large files such as videos, software downloads, and game assets.
+
+Many applications use a hybrid approach. They push static assets like JavaScript bundles, images, and video files to the CDN. Meanwhile, they configure dynamic content to pull through the CDN. For example, API responses for product listings might be cached for five minutes. User-specific API endpoints might not be cached at all, but still benefit from the CDN's optimized network routing.
+
+Cache Control Headers
+
+The Cache-Control header is crucial for directing CDN and browser caching behavior. Let me explain the most important configurations.
+
+To make content publicly cacheable for one hour, you would use: Cache-Control: public, max-age equals thirty-six hundred. The max-age value is in seconds, so thirty-six hundred seconds equals one hour.
+
+To cache for one day but allow stale content to be served while revalidating, you would use: Cache-Control: public, max-age equals eighty-six thousand four hundred, stale-while-revalidate equals thirty-six hundred. Eighty-six thousand four hundred seconds is one day.
+
+For dynamic or personalized content that should never be cached, use: Cache-Control: no-store.
+
+To allow caching but require revalidation with the origin before serving, use: Cache-Control: no-cache.
+
+To allow CDN caching but prevent browser caching, use: Cache-Control: s-maxage equals thirty-six hundred, max-age equals zero.
+
+For immutable content with versioned URLs, which is the ideal scenario, use: Cache-Control: public, max-age equals thirty-one million five hundred and thirty-six thousand, immutable. That max-age is one year in seconds.
+
+Let me explain the key directives in detail.
+
+The public directive means any cache can store the content, including CDNs and browsers. The private directive means only the browser can cache it, which is appropriate for personalized content. The max-age equals N directive specifies caching for N seconds. The s-maxage equals N directive is CDN-specific and overrides max-age for CDN caching. The no-cache directive requires revalidation before using a cached copy. The no-store directive means never cache the content at all. The immutable directive indicates the content will never change, so revalidation can be skipped. The stale-while-revalidate equals N directive allows serving stale content for N seconds while fetching fresh content in the background.
+
+ETags, which stands for entity tags, are used for validation. When the origin server responds, it includes an ETag header with a unique identifier, like "abc123def456", along with the content type and the actual data.
+
+Later, when requesting the same resource again, the client includes an If-None-Match header with the ETag value. If the content hasn't changed, the server responds with status code 304 Not Modified and no body, telling the client to use the cached version. If the content has changed, the server responds with status code 200 OK, a new ETag value, and the new content data.
+
+ETags save bandwidth when content hasn't changed because only the headers are transmitted, not the full content.
+
+The Vary header tells caches to store different versions of content based on different request characteristics. For example, Vary: Accept-Language means cache different versions for each language. Vary: Accept-Encoding means cache different versions for different compression formats.
+
+However, be very careful with the Vary header. Using Vary: Cookie is bad because every user gets a unique cache, preventing any cache sharing. Using Vary: User-Agent is also bad because there are thousands of different user agents, leading to cache explosion.
+
+Cache Invalidation
+
+There's a famous saying: "There are only two hard things in Computer Science: cache invalidation and naming things."
+
+The problem is this: content has changed at the origin server, but the CDN still has the old version. What do you do?
+
+Strategy one is TTL expiration. You set Cache-Control: max-age equals sixty, meaning content automatically expires after sixty seconds. The advantage is that it's simple and automatic. The disadvantage is that content remains stale for up to the TTL duration. There's a fundamental trade-off: short TTLs like sixty seconds mean fresher content but more origin traffic. Long TTLs like one day mean stale content but less origin traffic.
+
+Strategy two is using the purge API. You explicitly tell the CDN to remove cached content. For example, with Cloudflare, you would call their purge cache function, passing the zone ID and a list of file URLs to purge. With AWS CloudFront, you create an invalidation, specifying the distribution ID and paths to invalidate. With Fastly, you can purge by surrogate key, which is more flexible.
+
+The advantage of purge APIs is immediate invalidation. The disadvantages are that API calls are required, there's a propagation delay of seconds to minutes, and it costs money at scale.
+
+Strategy three is versioned URLs, which is the best practice. Instead of keeping the same URL like /static/style.css, you change it to /static/style.v2.css when you update the file. Alternatively, you could use a query parameter like /static/style.css?v=abc123. Your HTML references the new URL.
+
+The benefits are enormous. You get instant invalidation because a new URL triggers a cache miss, forcing a fresh fetch. Old and new versions can coexist, enabling graceful rollouts. You can roll back by reverting to the old URL. You can use very long TTLs since the content at each URL is immutable. And you don't need to make any purge API calls.
+
+In practice, your build process adds a content hash to the filename, turning style.css into style.a1b2c3d4.css. Or it adds a version query string like style.css?v=a1b2c3d4. Your HTML references the asset with the hash embedded. This is how all major websites handle static assets.
+
+Strategy four is surrogate keys, which is more advanced. You tag cached content with keys and then purge by those tags. For example, your response includes an X-Surrogate-Key header with values like "product-123 category-electronics". Later, when you need to invalidate all content related to product 123, you call the purge function with that key. This purges the product page, product reviews, product images, and any other content tagged with that surrogate key.
+
+This is useful for complex content relationships where one logical change affects multiple URLs.
+
+CDN Security Features
+
+CDNs provide critical security features beyond just caching.
+
+For DDoS protection, consider this scenario. Attack traffic of one hundred gigabits per second is aimed at your server. Your server has one gigabit per second capacity, meaning instant death. With a CDN in place, the attack traffic is distributed across over three hundred Points of Presence. Each PoP absorbs a small fraction of the attack. The CDN's total capacity might be over one hundred terabits per second. Your origin server is protected and never sees the attack traffic. CDNs are the first line of defense against distributed denial of service attacks.
+
+Web Application Firewalls, abbreviated as WAF, allow you to configure rules at the edge to block malicious requests. For example, requests attempting SQL injection, like a search query containing single quote semicolon DROP TABLE users semicolon, get blocked at the edge and never reach your origin. Cross-site scripting attempts in comments get blocked at the edge. Requests from user agents matching known scraper patterns get blocked or challenged. And rate limiting can throttle or block IPs making more than one hundred requests per second.
+
+Bot management differentiates between good bots and bad bots. Good bots that should be allowed include Googlebot and Bingbot for search indexing, and monitoring services like Uptimerobot. Bad bots that should be blocked or challenged include scrapers stealing content, credential stuffing attacks, and inventory hoarding bots.
+
+Detection methods include user agent analysis, JavaScript challenges that bots can't execute, CAPTCHA challenges, behavioral analysis of request patterns, and browser fingerprinting.
+
+Edge Computing
+
+Edge computing goes beyond caching to actually run code at edge locations. Traditional CDNs cache and serve static content. With edge computing, you can execute application logic at the edge.
+
+In the traditional model, the user connects to the edge cache, which then forwards dynamic requests to the origin server where your logic runs. In the edge computing model, the user connects to the edge where both caching and logic execution happen.
+
+Here's an example using Cloudflare Workers, which runs at over three hundred edge locations worldwide. You write JavaScript code that listens for fetch events. In this example, the code performs A/B testing at the edge, with no origin round-trip required. It randomly assigns users to variant A or B, modifies the request path to route to the appropriate backend, fetches the response, adds an experiment tracking header, and returns the response. All of this happens at the edge, close to the user.
+
+Edge computing has many use cases. For A/B testing, you avoid origin round-trips for variant selection. For authentication, you can validate JSON Web Tokens at the edge and reject bad requests early. For personalization, you inject user-specific content at the edge. For image optimization, you resize and compress images on the fly. For geolocation, you route or customize content based on user location. For API response transformation, you modify JSON responses. And for security, you block attacks before they reach your origin.
+
+Several platforms offer edge computing. Cloudflare Workers uses V8 isolates and has the fastest cold start, essentially zero milliseconds. AWS Lambda at Edge uses Node.js and integrates with CloudFront. Fastly Compute at Edge uses WebAssembly and has sub-millisecond startup. Vercel Edge Functions uses V8 and integrates with Next.js. And Deno Deploy uses V8 and Deno runtime with native TypeScript support.
+
+CDN Selection Criteria
+
+When choosing a CDN, evaluate several factors. Consider the PoP locations and whether they cover your user geographies. Don't just look at PoP count; measure actual latency performance. Evaluate the cache hit ratio and how effectively they cache content. Check if they offer origin shield to reduce origin load. Determine if you need edge computing capabilities. Assess their WAF and security features, including DDoS protection and bot management. Compare pricing for bandwidth, requests, and features. Look at their analytics and whether they provide real-time visibility. Evaluate their API and automation capabilities for cache purging and deployment. And consider the quality of their support, especially for enterprise needs.
+
+For a quick comparison: Cloudflare is best for general purpose use, has a great free tier, and offers Workers for edge computing. AWS CloudFront is best for integration with the AWS ecosystem. Fastly is best for real-time purging and edge compute needs. Akamai is best for enterprise customers and offers maximum global coverage. Bunny CDN is budget-friendly with good performance.
+
+Key Concepts Checklist
+
+Make sure you can identify cacheable versus dynamic content. Choose an appropriate cache invalidation strategy, preferably versioned URLs. Design your cache hierarchy from edge to regional to origin. Set appropriate Cache-Control headers for different content types. Consider what security features you need, such as WAF and DDoS protection. Calculate costs, as bandwidth pricing varies wildly between providers. Address what happens if the CDN fails. And consider whether edge computing makes sense for running logic at the edge.
+
+Practical Insights
+
+Cache hit ratio is everything. With a ninety percent hit ratio, your origin handles ten percent of traffic. With a ninety-nine percent hit ratio, your origin only handles one percent of traffic, which is a ten times reduction. Monitor and optimize for hit ratio.
+
+Versioned URLs are better than purge APIs. Purge APIs are expensive at scale. Purge propagation takes time, sometimes minutes. Versioned URLs provide instant invalidation and are free.
+
+Origin shield saves money. Without origin shield, each PoP cache miss hits your origin server. With origin shield, all PoPs share one cache, reducing origin traffic by over ninety percent. It's worth the small extra latency.
+
+CDN failures do happen. Have a fallback mechanism to route directly to your origin. Monitor CDN health continuously. For critical services, consider using multiple CDNs.
+
+Edge computing involves trade-offs. It adds complexity to your architecture. Debugging is harder because logs are distributed. Cold starts can add latency. Use edge computing for high-value computations that truly benefit from geographic proximity. Don't use it for simple pass-through operations or rarely-accessed endpoints.
+
+This concludes Chapter 7 on Content Delivery Networks and Edge Computing.

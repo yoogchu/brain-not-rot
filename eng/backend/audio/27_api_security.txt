@@ -1,0 +1,165 @@
+Chapter 27: API Security
+
+Why API Security Matters
+
+Let me tell you about a production incident that happened at 2:47 in the morning. Under normal circumstances, the API was handling about five thousand requests per second, which is pretty standard. But suddenly, the database started executing half a million SQL queries every single second. The result was catastrophic: the database CPU spiked to 100 percent, the connection pool became completely exhausted, and the entire system went down. What caused this disaster? A single unvalidated input parameter. That's it. The impact was devastating: two million dollars in lost revenue, database corruption, and customer data exposure.
+
+A single missing validation check can expose customer data, leading to GDPR violations and lawsuits. It can take down your entire production system through injection attacks or resource exhaustion. It can enable completely unauthorized access through broken authentication mechanisms. And it can cost you millions in data breach responses and regulatory fines.
+
+API security isn't just a checklist you go through once. It's defense in depth at every single layer of your application.
+
+The OWASP API Security Top 10
+
+The Open Web Application Security Project, or OWASP, maintains a list of the top ten most critical API security risks as of 2023. Let me walk you through the most important ones.
+
+First, there's Broken Object Level Authorization, often called BOLA. This is when attackers can access other users' resources. The impact? A complete data breach.
+
+Second, Broken Authentication, which means weak or missing authentication mechanisms. This leads to account takeover.
+
+Third, Broken Object Property Level Authorization. This includes mass assignment vulnerabilities where attackers can modify data they shouldn't have access to.
+
+Fourth, Unrestricted Resource Access. Without rate limiting, this opens you up to denial of service attacks.
+
+Fifth, Broken Function Level Authorization, which allows users to access admin functions, leading to privilege escalation.
+
+And sixth, Server Side Request Forgery, or SSRF, where attackers can make your server request internal URLs, giving them access to your internal network.
+
+The key areas to focus on are input validation, injection prevention, authentication, and authorization.
+
+Input Validation and Sanitization
+
+Let's talk about the fundamental problem. Imagine you have an endpoint that searches for users. In the dangerous version, you trust user input completely without any validation. You execute a SQL query by directly inserting the user's query string into your SQL statement. An attacker could send something like: quote semicolon DROP TABLE users semicolon dash dash. The result? SQL injection and complete data loss.
+
+The defense is to validate everything. Think of it as a multi-layer approach. When a request comes in, it goes through several stages. First, type validation using something like Pydantic. You check: is this a string or an integer or an email? Are all the required fields present? Second, business logic validation. Is the value in the allowed range? Is it a valid enum value? Does it satisfy your custom business rules? Third, sanitization. You remove dangerous characters and encode the input appropriately for the context where it will be used. Only after all these checks do you process the request.
+
+Here's how you implement this properly. You create a data validation class using Pydantic. For a user search request, you define that the query must be a string with a minimum length of one character and a maximum of one hundred characters. The limit parameter defaults to ten but must be between one and one hundred. The order by field defaults to created at.
+
+Then you add custom validators. For the query field, you check for dangerous SQL patterns like double dashes, semicolons, SQL comments, or stored procedure names. If any of these patterns appear, you reject the query immediately. For the order by field, you use a whitelist approach. You define the allowed fields: created at, updated at, name, and email. If the user tries to order by anything else, you reject it.
+
+When you actually execute the search, you use parameterized queries. You write your SQL with placeholders like colon query and colon limit, then pass the actual values as a separate dictionary. This way, even if someone tries to inject SQL, it's treated as literal string data, not executable code.
+
+The key principles are: validate at the API boundary using tools like Pydantic, always use whitelists instead of blacklists for allowed values, parameterize your queries and never use string concatenation, and sanitize output with context-appropriate encoding.
+
+SQL Injection Prevention
+
+Let me explain exactly how SQL injection works. Say a user provides the input: admin quote space OR space quote 1 quote equals quote 1. If you naively insert this into a SQL query, it becomes: SELECT star FROM users WHERE username equals quote admin quote OR quote 1 quote equals quote 1 quote. Since one always equals one, this condition is always true, so the query returns all users in your database, not just the admin user.
+
+The first line of defense is parameterized queries. Instead of concatenating strings, you use a SQL statement with named parameters, like colon username. When you execute this query, you pass the user input as a separate parameter. The database driver automatically escapes any dangerous characters, so even malicious input is treated as a literal string.
+
+The second defense is using an ORM, or Object Relational Mapper, like SQLAlchemy. When you use ORM methods to filter and query data, it automatically parameterizes everything behind the scenes.
+
+The third defense is whitelisting for items that can't be parameterized. SQL parameters work great for values, but they don't work for column names or table names. So if you need to sort by a user-specified field, you create a whitelist of allowed fields like id, name, email, and created at. You check if the user's requested field is in that whitelist, and only if it is, you use it in your query.
+
+Comparing these approaches: parameterized queries give you excellent security, high flexibility, and excellent performance. ORM gives you excellent security, medium flexibility, and good performance. Stored procedures give you excellent security, low flexibility, and excellent performance. The rule of thumb: always use parameterized queries or an ORM for values, and use whitelisting for column or table names.
+
+Cross-Site Scripting Prevention
+
+Cross-site scripting, or XSS, is another major threat. Here's the problem. Say you have an endpoint that creates comments, and you store whatever content the user sends directly into the database. An attacker could send a comment containing a script tag that fetches a URL on their evil server, appending the user's cookies. When your frontend renders this comment without sanitization, the script executes in other users' browsers and steals their cookies.
+
+The defense is to sanitize output. You can use a library like Bleach. In your response model, you add validators that clean the content. You have two options: either strip all HTML tags completely, which is the safest approach, or allow only safe HTML tags like bold, italic, underline, anchor, and paragraph tags, with specific allowed attributes.
+
+Another important defense is the Content Security Policy header. You can add middleware that sets this header on all responses. The policy specifies where scripts can be loaded from. For example, you might say: default source is self, meaning only load resources from your own domain. Script source is self plus a specific trusted CDN URL. Image source can be self, data URIs, or any HTTPS source. This prevents injected scripts from executing because the browser blocks them based on the policy.
+
+CORS: Cross-Origin Resource Sharing
+
+CORS controls which web origins can access your API. Let me explain the flow. Say you have a browser on app dot example dot com trying to access an API on api dot example dot com. First, the browser sends a preflight request using the OPTIONS method. It says: I'm from origin https colon slash slash app dot example dot com, and I want to make a POST request. The server responds with headers saying which origins are allowed, which methods are allowed, and how long to cache this preflight response. If the preflight succeeds, the browser sends the actual request with the origin header, and the server responds with the actual data plus the access control headers.
+
+Here's the critical part: configuration. Never, ever configure CORS with allow origins set to star, meaning any origin, when you also have allow credentials set to true. This combination is extremely dangerous because any website can make requests to your API and read the responses, including sensitive user data.
+
+The secure approach is to whitelist specific origins. You create a list of allowed origins like https colon slash slash app dot example dot com and https colon slash slash admin dot example dot com. If you're in development mode, you might add localhost port 3000. Then you configure CORS middleware with this specific list of allowed origins, enable credentials, specify which HTTP methods are allowed, list which headers are allowed, and set a max age for how long to cache preflight responses.
+
+Common mistakes include: using star for allow origins with credentials enabled, which lets any site read your responses. Using regex patterns like star dot example dot com, which can accidentally allow evil example dot com. And reflecting the origin header without validation, which effectively allows any origin. Always validate against an exact whitelist.
+
+Authentication Methods: API Keys versus OAuth versus JWT
+
+There are three main authentication approaches, each with different trade-offs.
+
+First, API keys. This is the simplest approach. Your endpoint expects a header called X-API-Key. You look up this key in your database to find the associated client. If the client doesn't exist or isn't active, you return a 401 unauthorized error. Otherwise, you return the data.
+
+API keys are simple and easy for clients to use, but they have no built-in expiration and can't represent user permissions well. Use them for service-to-service communication and simple public APIs. Don't use them for user authentication or when you need fine-grained permissions.
+
+Second, OAuth 2.0. This is a full authorization framework. You have a token URL endpoint where users log in. You authenticate the username and password, and if valid, you create an access token with an expiration time, typically 15 minutes. You return this token to the client. Then, for protected endpoints, you validate the token. If it's invalid or expired, you return a 401 error.
+
+The OAuth flow involves multiple parties. The client requests authorization from the auth server, providing their client ID and redirect URI. The auth server sends back an authorization code. The client exchanges this code for an access token by providing their client secret. The auth server returns the access token. Now the client can make API requests by including this token in the authorization header as a bearer token. The API server validates the token and returns the protected resource.
+
+Use OAuth for third-party integrations and delegated authorization, where users are granting access to their data. Don't use it for simple internal APIs where the overhead isn't justified.
+
+Third, JWT, which stands for JSON Web Tokens. A JWT has three parts separated by dots. The first part is the header, which specifies the algorithm. The second part is the payload, which contains the actual claims like the user ID, permissions, expiration time, and issuer. The third part is the signature, which is created using HMAC SHA-256 or another algorithm. All three parts are base64 encoded.
+
+When creating a JWT, you build a payload dictionary with the subject (the user ID), permissions, expiration time (typically one hour from now), and issuer. You encode this with your secret key using the specified algorithm. When verifying a JWT, you decode it using the same secret key. If the signature is invalid or the token is expired, you reject it.
+
+JWTs are stateless, meaning you don't need to look them up in a database. They contain claims directly in the token. You can verify them offline without hitting a database. However, you can't revoke them before they expire unless you maintain a blacklist, which defeats the stateless benefit. They're also larger than simple session tokens.
+
+Use JWTs for microservices architectures and mobile apps where stateless authentication is valuable. Don't use them when you need instant revocation capability, like when a user logs out or their account is compromised.
+
+Comparing all these methods: API keys are stateless and not easily revocable without manual intervention. They don't have built-in expiration. They're best for service-to-service communication and have low complexity. OAuth 2.0 is not stateless because you need to validate tokens against the auth server. It's revocable and has built-in expiration. It's best for third-party integrations and has high complexity. JWTs are stateless and not revocable without extra infrastructure. They have built-in expiration. They're best for microservices and mobile apps and have medium complexity. Session cookies are not stateless, are revocable, have expiration, are best for traditional web apps, and have low complexity.
+
+Rate Limiting for Security
+
+Rate limiting isn't just about preventing overload. It's also critical for security, particularly preventing brute-force attacks. Let me show you how to implement brute-force protection.
+
+You maintain two data structures: one tracking failed login attempts and another tracking when specific identifiers are blocked until. When checking if someone is blocked, you see if they're in the blocked until dictionary and whether the current time is before their blocked until time. If so, they're still blocked. Otherwise, you remove them from the blocked list.
+
+When recording a failure, you first clean up old attempts, keeping only those from the last 15 minutes. You add the current timestamp to their failure list. If they now have five or more failures in the last 15 minutes, you block them for one hour.
+
+In your login endpoint, you first check if the client's IP address is blocked. If so, you immediately return a 429 too many requests error. If they're not blocked, you attempt to authenticate. If authentication fails, you record the failure for both their IP address and their username. This prevents both distributed attacks from many IPs trying one account, and single-IP attacks trying many accounts.
+
+You should also implement progressive limits based on endpoint sensitivity. For the login endpoint, allow only five attempts per minute to prevent brute-force attacks. For password reset, allow only three attempts per hour to prevent email enumeration. For resource-intensive endpoints like search, allow twenty per minute.
+
+You can also vary limits based on user tier. Premium users might get one thousand requests per minute. Regular authenticated users might get one hundred per minute. Anonymous users might get only ten per minute.
+
+API Versioning and Security
+
+API versioning creates a security challenge. Imagine you have an old version, v1, that returns sensitive data like social security numbers and salary without permission checks. You create a new version, v2, that returns only public data and has proper authorization. The problem is, if the old version is still accessible, attackers can bypass your new security by simply using the old version.
+
+The solution is secure deprecation with a clear timeline. You define your API versions as an enum. You maintain a dictionary of deprecated versions with their sunset date and migration guide URL. You add middleware that checks if the requested version is deprecated. If the sunset date has passed, you return a 410 Gone error with a link to the migration guide. If the sunset date hasn't passed yet, you allow the request but add deprecation headers to warn clients.
+
+A typical deprecation timeline looks like this: In month zero, you release version 2 and announce that version 1 is deprecated. At month six, you send warning emails to all clients still using version 1. At month twelve, version 1 starts returning 410 Gone errors. At month eighteen, you completely remove the version 1 code from your codebase.
+
+Security Headers
+
+Every response from your API should include security headers. You can add middleware that sets these headers automatically.
+
+X-Frame-Options set to DENY prevents your API responses from being embedded in iframes, protecting against clickjacking.
+
+X-Content-Type-Options set to nosniff prevents browsers from MIME-sniffing responses, which could lead to security vulnerabilities.
+
+Strict-Transport-Security with max-age of 31536000 seconds (one year) forces browsers to always use HTTPS when connecting to your API.
+
+Content-Security-Policy specifies where scripts and other resources can be loaded from. You might set default source and script source to self, meaning only from your own domain, and frame-ancestors to none, preventing framing.
+
+Referrer-Policy set to strict-origin-when-cross-origin controls how much referrer information is sent with requests.
+
+Key Concepts Checklist
+
+Let me summarize the key concepts you should master. First, implement layered validation with three stages: type validation, business logic validation, and sanitization.
+
+Second, use parameterized queries or an ORM for SQL injection prevention. Never concatenate user input into SQL strings.
+
+Third, sanitize output and set Content Security Policy headers for cross-site scripting prevention.
+
+Fourth, configure CORS with whitelisted origins. Never use star for allow origins when credentials are enabled.
+
+Fifth, choose the appropriate authentication method. Use API keys for service-to-service communication, OAuth for third-party integrations, and JWT for stateless authentication in microservices.
+
+Sixth, add rate limiting specifically for brute-force prevention on sensitive endpoints like login and password reset.
+
+Seventh, include security headers on all responses.
+
+And eighth, plan API versioning with a clear sunset timeline so you can safely deprecate insecure old versions.
+
+Practical Insights
+
+Defense in depth requires multiple layers working together. Layer one is input validation at the API boundary using tools like Pydantic. Layer two is business logic validation in your service layer. Layer three is database constraints as a last resort safety net. Layer four is output sanitization before rendering to users. And layer five is security headers on all responses. If an attacker gets through one layer, the other layers are there to stop them.
+
+A common authentication mistake is using weak hashing algorithms. Never use MD5 for password hashing. Instead, use bcrypt or argon2 through a library like passlib. These algorithms are specifically designed for password hashing and are resistant to brute-force attacks.
+
+For JWT best practices, use short expiration times: 15 minutes for access tokens, 30 days for refresh tokens. Store refresh tokens in your database so you can revoke them. Rotate your secret keys periodically. And for microservices, use RS256 which is asymmetric encryption, instead of HS256. This way, services can verify tokens without having the secret key that signs them.
+
+Set up security monitoring alerts. Alert when the login failure rate exceeds five percent, which indicates credential stuffing attacks. Alert on spikes in 401 or 403 responses, indicating unauthorized access attempts. Alert when you see SQL patterns in request parameters, indicating injection attempts. Alert on rate limit hits from a single IP address, indicating automated attacks.
+
+Track important security metrics over time. Measure your time to detect security incidents. Measure your time to patch vulnerabilities once discovered. Track how frequently you rotate API keys. And monitor what percentage of your traffic is using the latest API version versus deprecated versions.
+
+For API key management, generate keys using a cryptographically secure random number generator, not just regular random. Store them hashed in your database, just like passwords. Support key rotation without downtime by allowing multiple active keys per client. Include a prefix in your keys for easy identification, like sk underscore live underscore for live secret keys. And log all API key usage for audit trails.
+
+That's the foundation of API security. Remember, security isn't a feature you add at the end. It's a fundamental part of your architecture that you build in from day one, layer by layer.

@@ -1,0 +1,183 @@
+Chapter 10: DNS and Service Discovery
+
+DNS: The Internet's Phone Book
+
+The Problem DNS Solves
+
+Let's start by understanding the fundamental problem that DNS solves. Without DNS, if you wanted to connect to Google, you'd have to type something like "connect to 142.250.185.206" - which tells you nothing about what service you're connecting to. But with DNS, you can simply type "connect to google.com" and immediately understand that you're connecting to Google. DNS, or Domain Name System, translates human-readable domain names into IP addresses that computers can use to communicate.
+
+DNS Resolution Process
+
+Now, let's walk through what happens when you type a domain name like "api.example.com" into your browser. This is a multi-step process with several layers of caching.
+
+First, your browser checks its own cache. If it has recently looked up this domain and still has the result cached, it will use that immediately and we're done. If not found, the process continues.
+
+Second, your operating system checks its DNS cache. Again, if the operating system has recently resolved this domain, it will use the cached result and we're done. If not found, we continue.
+
+Third, the query goes to your local DNS resolver. This is typically provided by your Internet Service Provider, or by your corporate network if you're in an office environment. If the resolver has the result cached from a previous query, it returns it immediately. If not, the resolver needs to query the DNS hierarchy.
+
+Fourth, the local resolver contacts one of the root DNS servers. There are thirteen root server clusters distributed around the world. The root server doesn't know where api.example.com is, but it can tell you where to find the servers responsible for the .com top-level domain. It responds with something like "I don't know api.example.com, but the .com TLD servers are at 192.5.6.30."
+
+Fifth, the local resolver contacts the TLD servers for .com. These servers are responsible for all .com domains, but they don't have the specific records for every domain. Instead, they point you to the authoritative nameservers for the specific domain. The TLD server responds with "I don't know api.example.com, but the nameservers for example.com are at ns1.example.com."
+
+Sixth, the local resolver finally contacts the authoritative nameserver for example.com. This is the server that has the definitive answer. It responds with "api.example.com is 93.184.216.34."
+
+Seventh and finally, the result is cached at each level based on the TTL, or Time To Live value, and returned to the user.
+
+To visualize this hierarchy: your browser cache sits at the top, then your operating system DNS cache, then your local resolver from your ISP or corporate network. The local resolver queries the root servers, which point to the TLD servers, which point to the authoritative nameservers, which finally provide the IP address.
+
+DNS Record Types
+
+DNS supports several types of records, each serving a different purpose. Let me explain the most important ones.
+
+The A record maps a domain name to an IPv4 address. For example, api.example.com might map to 93.184.216.34.
+
+The AAAA record, spelled with four A's, maps a domain name to an IPv6 address. For example, api.example.com might map to 2606:2800:220:1 and so on with the full IPv6 address.
+
+The CNAME record, which stands for Canonical Name, creates an alias from one domain to another. For example, www.example.com might be a CNAME pointing to example.com.
+
+The MX record, or Mail Exchange record, specifies the mail server for a domain. For example, example.com might have an MX record pointing to mail.example.com with a priority of 10.
+
+TXT records store arbitrary text and are commonly used for SPF records, DKIM records, and domain verification.
+
+NS records, or Name Server records, specify which servers are authoritative for a domain. For example, example.com might have NS records pointing to ns1.example.com.
+
+SRV records, or Service records, provide service location information including the server, port, priority, and weight for load balancing.
+
+PTR records, or Pointer records, provide reverse DNS lookup, mapping an IP address back to a domain name. For example, 93.184.216.34 might have a PTR record pointing to api.example.com.
+
+Let me give you a couple of examples. If you query for an A record of api.example.com, you might see a response showing that api.example.com has a TTL of 300 seconds and points to IP address 93.184.216.34. The TTL, measured in seconds, indicates how long this result can be cached.
+
+For a CNAME example, if you query www.example.com, you might see that www.example.com is a CNAME pointing to example.com with a TTL of 3600 seconds, and then example.com is an A record pointing to 93.184.216.34 with a TTL of 300 seconds. This creates a chain: www.example.com points to example.com, which points to the final IP address.
+
+SRV records are particularly interesting for service discovery. An SRV record for HTTP service might look like this: the service name is underscore http dot underscore tcp dot api dot example dot com, with a TTL of 300 seconds. The record contains four key pieces of information: a priority of 10, where lower numbers are preferred; a weight of 5 for load distribution among servers with the same priority; a port number of 8080; and the target host server1.example.com.
+
+TTL and Caching
+
+Let's talk about TTL, or Time To Live, which controls how long DNS resolvers cache a record.
+
+With a low TTL, like 60 seconds, DNS changes propagate faster, but this generates more DNS queries because the records expire quickly. Low TTLs are good for scenarios requiring fast failover or frequent load balancing changes.
+
+With a high TTL, like 86,400 seconds which equals one day, there are fewer DNS queries because records are cached longer, but DNS changes take longer to propagate. High TTLs are good for stable records that don't change often and when you want to reduce load on DNS servers.
+
+When you change a DNS record, there's a propagation delay. Let's say you change api.example.com to point to a new IP address. Here's the timeline: at time zero, the authoritative nameserver is updated with the new IP. From time zero to time TTL, some resolvers still have the old IP cached. At time TTL, all caches have expired and everyone gets the new IP. So if your TTL is 3600 seconds, full propagation can take up to one hour.
+
+For zero-downtime migration, here's a recommended strategy. First, lower the TTL to 60 seconds and wait for the old TTL to expire so everyone is using the shorter cache time. Second, make your DNS change. Third, wait for propagation, which should only take about 60 seconds now. Fourth, verify that the new IP is serving traffic correctly. Fifth, raise the TTL back to 3600 seconds to reduce DNS query load.
+
+DNS for Load Balancing
+
+DNS can be used for basic load balancing in several ways.
+
+Round-Robin DNS is the simplest approach. When you query api.example.com, the DNS server might return three A records: 192.168.1.1, 192.168.1.2, and 192.168.1.3. Clients rotate through these IPs. However, this approach is limited because there are no health checks, you can't do weighted distribution, and clients may cache just one IP rather than rotating.
+
+Geographic DNS, also called GeoDNS, returns different IP addresses based on where the user is located. For example, a user in New York City queries api.example.com and gets 10.0.1.1, which is the US-East datacenter. A user in Tokyo queries the same domain and gets 10.0.2.1, which is the Asia datacenter. Major providers like Route53, Cloudflare, and NS1 offer this capability.
+
+Weighted DNS allows you to distribute traffic unevenly. For example, you might configure api.example.com to send 70% of traffic to 10.0.1.1, your primary server, and 30% to 10.0.2.1, which could be a secondary server or a canary deployment. This is useful for gradual traffic shifting and canary deployments.
+
+Service Discovery Patterns
+
+Now let's move on to service discovery, which is a critical problem in microservices architectures.
+
+The Microservices Problem
+
+Imagine you have an Order Service that needs to call a Payment Service. With static configuration, you might hardcode the payment service URL as "http://10.0.1.50:8080". But this creates several problems. First, if the Payment Service IP address changes, you need to update the configuration and redeploy the Order Service. Second, if the Payment Service scales to multiple instances, which instance should you call? Third, if the Payment Service fails, your configuration still points to the dead instance.
+
+Pattern 1: Client-Side Discovery
+
+In client-side discovery, the client service queries a service registry directly. Here's how it works: First, the client, let's say the Order Service, queries the service registry for "payment-service". Second, the service registry returns a list of all available instances, such as 10.0.1.50:8080, 10.0.1.51:8080, and 10.0.1.52:8080. Third, the client picks one instance using its own load balancing logic. Fourth, the client makes a direct call to the chosen Payment Service instance.
+
+The pros of this approach are that there's no proxy in the path, which means lower latency, and the client has full control over load balancing decisions.
+
+The cons are that every client needs discovery logic built in, every client needs load balancing logic, and clients become tightly coupled to the service registry.
+
+Tools that support this pattern include Netflix Eureka, Consul in client mode, and etcd.
+
+Pattern 2: Server-Side Discovery
+
+In server-side discovery, a load balancer sits between the client and the services. Here's the flow: First, the client calls "payment-service" without knowing where it is. Second, the request goes to a load balancer, which consults the service registry to find healthy instances. Third, the load balancer forwards the request to one of the healthy Payment Service instances.
+
+The pros of this approach are that the client is simple and just calls the load balancer, the load balancing logic is centralized, and it's easy to add health checks at the load balancer level.
+
+The cons are that there's an extra network hop which adds latency, the load balancer can become a bottleneck, and the load balancer itself needs to be highly available.
+
+Tools that support this pattern include AWS Application Load Balancer with ECS, Kubernetes Services, and Consul with NGINX.
+
+Pattern 3: DNS-Based Discovery
+
+DNS-based discovery uses internal DNS servers to map service names to IP addresses. Here's how it works: First, the client queries the internal DNS for "payment-service.internal". Second, the internal DNS server returns one or more IP addresses, such as 10.0.1.50, 10.0.1.51, and 10.0.1.52. Third, the client makes a direct call to one of these IPs.
+
+In Kubernetes, this works particularly well. If you have a service named "payment-service" in the "production" namespace, Kubernetes creates a DNS name "payment-service.production.svc.cluster.local". A pod can simply call "http://payment-service:8080" and Kubernetes DNS resolves this to the ClusterIP. Then kube-proxy routes the request to a healthy pod.
+
+Service Registration
+
+Services need to register themselves with the service registry. There are two main patterns.
+
+Self-Registration
+
+In self-registration, each service instance is responsible for registering itself. Here's what happens: When a Payment Service instance starts up, it registers itself with the service registry. It periodically sends heartbeat messages to indicate it's still alive. When it shuts down, it deregisters itself.
+
+Here's how you might implement this. You'd create a ServiceInstance class that takes a registry, service name, host, and port. When the instance starts, it calls registry.register with its details. It starts a background thread that periodically calls registry.heartbeat every 10 seconds. When the instance stops, it calls registry.deregister to remove itself from the registry.
+
+Third-Party Registration
+
+In third-party registration, an external component watches the service instances and manages registration. The service itself just runs normally without any awareness of the registry. A separate registrar component, which might be a sidecar container or part of the platform, watches the service's health and manages registration and deregistration with the service registry.
+
+Kubernetes uses this model. You create a Deployment that specifies you want 3 replicas of your payment service running on port 8080. Then you create a Service object that selects pods with the label "app: payment" and exposes port 8080. Kubernetes automatically watches the pod lifecycle, updates the endpoints as pods come and go, and updates DNS records accordingly. The service code doesn't need any registry awareness.
+
+Health Checks
+
+Health checks are critical for service discovery to work reliably.
+
+Active Health Checks
+
+With active health checks, the registry or load balancer periodically probes each instance. For example, the registry sends a GET request to the /health endpoint every few seconds. If the instance returns 200 OK, it's healthy. If three consecutive checks fail, the instance is marked unhealthy and removed from rotation. So your list of instances might show 10.0.1.50 as healthy, 10.0.1.51 as healthy, but 10.0.1.52 is marked unhealthy and removed from the rotation.
+
+Passive Health Checks
+
+Passive health checks monitor actual traffic for failures. If requests to an instance result in errors - say three 500 errors in 30 seconds - the instance is marked unhealthy even without explicit health check probes.
+
+Health Check Endpoint
+
+A good health check endpoint should verify that the service and its dependencies are functioning. For example, your health endpoint might check database connection status, Redis connection status, and available disk space. If all checks pass, it returns status "healthy" with HTTP 200. If any check fails, it returns status "unhealthy" with HTTP 503.
+
+Liveness vs Readiness
+
+Modern platforms like Kubernetes distinguish between two types of health checks.
+
+A liveness check answers the question: Is the process alive? If the liveness check fails, the container is restarted. This check should verify that the application is responding at all.
+
+A readiness check answers the question: Can it serve traffic? If the readiness check fails, the instance is removed from the load balancer but not restarted. This check should verify that all dependencies are connected and the instance is ready to handle requests.
+
+In Kubernetes, you might configure a liveness probe to check the /healthz endpoint on port 8080, starting 10 seconds after the container starts and checking every 5 seconds. The readiness probe might check the /ready endpoint, starting after 5 seconds and checking every 3 seconds.
+
+Service Discovery Tools
+
+Let me compare the major service discovery tools.
+
+Consul is a CP system, meaning it prioritizes Consistency and Partition tolerance using the Raft consensus algorithm. It provides strong consistency and is best for multi-datacenter deployments and scenarios requiring robust health checks.
+
+etcd is also a CP system using Raft for strong consistency. It's the backbone of Kubernetes and is excellent for storing configuration data.
+
+ZooKeeper is a CP system using the ZAB consensus algorithm. It's commonly used in the Hadoop ecosystem.
+
+Eureka is an AP system, meaning it prioritizes Availability and Partition tolerance with eventual consistency. It's part of the Netflix OSS stack.
+
+Kubernetes has built-in service discovery using strong consistency, and it's the obvious choice for Kubernetes-native applications.
+
+Key Concepts Checklist
+
+To master this topic, you should be able to explain the DNS resolution hierarchy from browser cache through to authoritative nameservers. You should be able to describe common record types like A, CNAME, and SRV records and when to use each. You should understand TTL trade-offs between fast propagation and reduced query load. You should be able to compare client-side versus server-side service discovery patterns. You should be able to describe self-registration versus third-party registration patterns. You should be able to design a health check strategy that includes both liveness and readiness checks. And you should know when to use which discovery tool based on your architecture and requirements.
+
+Practical Insights
+
+Let me share some practical wisdom about DNS and service discovery.
+
+First, some DNS gotchas to watch out for. The JVM caches DNS results forever by default, which can cause problems when IP addresses change. You need to set the "networkaddress.cache.ttl" property to a reasonable value. Also, some clients don't respect TTL values and cache DNS results longer than they should. Finally, DNS-based failover is slow because you have to wait for the TTL to expire plus any client-side caching.
+
+For service discovery tool selection, if you're running on Kubernetes, just use the built-in DNS and Services - they work great and require no additional infrastructure. If you're in a multi-cloud or hybrid environment, consider Consul for its multi-datacenter support. For simple setups, DNS-based discovery may be sufficient.
+
+There are several health check anti-patterns to avoid. Don't create a health check that doesn't actually check anything meaningful. Don't make your health check do expensive work that could impact performance. Don't forget to check dependencies - your health check should verify that the database and other critical services are reachable. And don't remove an instance immediately on a single failure - use a threshold like three consecutive failures to avoid flapping.
+
+Regarding registration patterns, self-registration gives you more control but requires more code in each service. Platform registration means less code but creates platform lock-in. The most modern approach is to let platforms like Kubernetes or ECS handle registration automatically.
+
+Finally, understand the limitations of DNS-based discovery. There are no real-time updates because of TTL delays. There's no health-based routing built into DNS. You can't do sophisticated traffic splitting. DNS-based discovery is good for initial service discovery and simple cases. For advanced routing, traffic splitting, and observability, you'll want to use a service mesh on top of basic DNS discovery.

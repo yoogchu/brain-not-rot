@@ -1,0 +1,133 @@
+Chapter 24: Deployment Strategies
+
+Why Deployment Strategy Matters
+
+Let me start with a scenario that shows why this topic is so critical. Imagine your team deploys new code at 2 PM on a Tuesday. Within minutes, there's a bug in production and users can't complete their checkout. Your team scrambles to rollback, but someone asks: "Which version was running before?" Meanwhile, you're losing fifty thousand dollars in revenue every minute. It takes 45 minutes to identify the right version, rollback, and restore service. This kind of chaos is what happens when you don't have a proper deployment strategy.
+
+The deployment is the most dangerous moment in a service's lifecycle. A bad deployment strategy means several things. First, you'll have user-facing outages during deploys. Second, you won't be able to rollback quickly when things go wrong. Third, you'll have all-or-nothing releases where deployment is tightly coupled with feature releases. And finally, database migration failures can cause data corruption.
+
+Good deployment strategies, on the other hand, minimize risk, enable fast rollback, and decouple deployment from feature releases. Let's explore the different strategies available.
+
+Rolling Deployment
+
+First, let's talk about rolling deployments. The problem here is simple: replacing all servers at once means downtime. You need a way to gradually replace old servers with new ones while maintaining service availability.
+
+Here's how it works. Imagine you have four servers all running version 1 of your application. In a rolling deployment, you start by deploying to the first server. Once that's healthy, you move to the second server, then the third, and finally the fourth. At each step, the newly deployed server is verified before moving to the next one. This means that during the deployment, you'll have a mix of servers running version 1 and version 2 simultaneously.
+
+Let me walk you through a typical implementation. You'd create a deployer class that takes a list of servers and a health check URL. The deployer processes servers in batches, typically about 25% at a time. For each server in a batch, you first remove it from the load balancer to drain traffic. Then you deploy the new version to that server. This might involve pulling a new Docker image and restarting the container. After deployment, you wait for health checks to pass. This is crucial - you need to verify the server is actually healthy before adding it back to the load balancer. If health checks fail, you rollback that specific server. Once a server passes health checks, you add it back to the load balancer and move on to the next batch.
+
+The key parts of this process are draining the server, which means removing it from the load balancer and waiting for existing connections to finish. Then deploying to that server by pulling new code or containers. Then waiting for health checks, which should validate that the application is actually working, not just that the process started. And finally, enabling the server by adding it back to the load balancer rotation.
+
+Let's talk about trade-offs. On the positive side, gradual rollout limits the blast radius if something goes wrong. You also don't need extra capacity since you're reusing existing servers. However, you'll have mixed versions running simultaneously during the deployment, which can be problematic. Rollback can be tricky because you have to either stop mid-deployment or roll forward or backward across all servers. And deployment takes longer compared to instant switchover strategies. Most importantly, your application must support two versions running at the same time, which requires backward compatibility.
+
+You should use rolling deployments for standard deployments with stateless services, especially when you can't afford extra infrastructure. Don't use rolling deployments for breaking database changes, services with complex state synchronization, or urgent hotfixes where the gradual rollout is too slow.
+
+Blue-Green Deployment
+
+Now let's look at blue-green deployments. The problem that blue-green solves is that rolling deployments are slow and involve running mixed versions. With blue-green, you want instant switchover and instant rollback capability.
+
+The concept is elegant. You maintain two identical production environments: blue and green. At any given time, one is live and one is idle. Let's say blue is currently live and receiving all user traffic. When you want to deploy version 2, you deploy it to the green environment while blue continues to handle traffic. Once green is fully deployed and tested, you switch the load balancer to point to green instead of blue. This switch is instantaneous - just a configuration change at the load balancer level. Now green is live and blue is idle. If anything goes wrong, you can instantly switch back to blue.
+
+Here's how you'd implement this. You'd have a blue-green deployer class that tracks two target groups - one for blue and one for green - and knows which one is currently live. When deploying, you first determine which environment is currently live. You then deploy to the inactive environment. After deployment, you run smoke tests against the new environment before any users see it. This is a huge advantage - you can test with production-like data and infrastructure without affecting users. If smoke tests pass, you switch traffic by modifying the load balancer listener to point to the new environment. After switching, you monitor metrics for a warm-up period, typically about a minute. If metrics show problems, you can rollback instantly by just switching the load balancer back.
+
+The implementation details involve using your cloud provider's load balancer API to change which target group receives traffic. For smoke tests, you'd run automated tests against the new environment - checking health endpoints, API endpoints, and critical user flows. After the switch, you'd monitor error rates and latency metrics to ensure everything is working correctly.
+
+The trade-offs are interesting. Switchover is instant - just seconds. Rollback is also instant - you just switch back to the previous environment. You can test in a production-like environment before users see it, which dramatically reduces risk. However, you need twice the infrastructure capacity since you're maintaining two full environments. Database state can diverge between environments, making database migrations complex. And maintaining both environments can be expensive, especially for frequent deployments.
+
+Use blue-green deployments for critical services where instant rollback is essential, and when you can afford the cost of doubling your capacity. Don't use it in cost-constrained environments, with stateful services that have complex data, or if you deploy very frequently since maintaining a dual environment becomes expensive.
+
+Canary Deployment
+
+Canary deployments address a different problem. You want to test new code with real production traffic, but you only want to expose a small percentage of users to risk if something goes wrong.
+
+Here's the canary strategy. You deploy the new version to a small subset of servers - the canary servers. Then you configure your load balancer to route only a small percentage of traffic to those servers, maybe 5%. You monitor metrics carefully, comparing the canary servers to the stable servers. If everything looks good, you gradually increase the percentage - maybe to 10%, then 25%, then 50%, and finally 100%. At each stage, you monitor for a period of time, often called the bake time, to ensure metrics stay healthy. If at any point metrics degrade, you can quickly rollback by reducing canary traffic to zero.
+
+A typical implementation would have a canary deployer class that manages stable servers and canary servers separately. You'd define a series of traffic percentages to roll out gradually, something like 5%, 10%, 25%, 50%, and 100%. At each percentage level, you'd configure the load balancer's traffic split and then monitor for a bake time, maybe 15 minutes.
+
+The critical part of canary deployments is the monitoring. You need to compare canary metrics to stable baseline metrics. You're looking for statistically significant differences in error rates, latency, and business metrics like conversion rate. For example, you might say the canary fails if its error rate is more than 50% higher than the stable baseline, or if latency is 30% higher, or if conversion rate drops by more than 5%. This comparison must be rigorous because with small traffic percentages, you're dealing with small sample sizes and high variance.
+
+During the bake period, you'd continuously check metrics every 30 seconds or so. If metrics stay healthy for the entire bake time, you proceed to the next percentage level. If metrics show problems, you immediately set canary traffic back to zero, which effectively rolls back without impacting most users.
+
+The trade-offs: Risk is minimal since only a small percentage of users see the new version initially. You get real production data to validate the deployment, which is more realistic than any test environment. Rollback is fast - just reduce traffic to zero percent. However, you need complex traffic routing at the load balancer level. You require good metrics and monitoring to detect issues. Some users will see the broken version during the rollout. And the deployment is slow since you're doing a gradual rollout over hours.
+
+Use canary deployments for high-risk changes, user-facing services, and when you have good metrics and monitoring in place. Don't use canaries for backend jobs where there's no traffic to route, when you lack the metrics to detect issues, or for time-sensitive deployments where the gradual rollout is too slow.
+
+Feature Flags
+
+Feature flags solve a different problem entirely. Normally, deployment and feature release are tightly coupled. With feature flags, you want to deploy code to production but control when features become visible to users.
+
+The concept is straightforward. You deploy code that includes both the new feature and the old behavior. Then you use conditional logic to check a feature flag. If the flag is enabled for a particular user, they see the new feature. If not, they see the old behavior. The feature flag service controls who sees what, and you can change this configuration without deploying new code.
+
+For example, you might deploy new checkout code but wrap it in a feature flag. The code checks: if the "new checkout" flag is enabled for this user, show the new checkout flow, otherwise show the old checkout flow. The flag configuration lives in a separate service or database and can specify things like: this flag is enabled, it's rolled out to 10% of users, and it's enabled for specific rules like users on the beta plan.
+
+A feature flag implementation would have a method to check if a flag is enabled for a given context. The context includes information about the user, like their ID, plan, country, and so on. The system first checks if the flag is enabled at all. Then it evaluates any targeting rules - for example, "enable for users where plan equals beta". Then it checks percentage rollout, where you use consistent hashing to ensure the same user always gets the same result. This is important - you don't want a user to see the new feature one minute and the old feature the next.
+
+The implementation uses a hash of the flag name and user ID to deterministically assign users to buckets. If the user's bucket is less than the rollout percentage, they're in the rollout.
+
+Feature flags enable several powerful patterns. First, you can use them as kill switches - if a feature is broken, you can instantly disable it by flipping the flag, no deployment needed. Second, you can do gradual rollouts - start at 5% for internal users, then 10% for all users, then 25%, 50%, and finally 100%. Third, you can run A/B tests by assigning different users to different variants. And fourth, you can use operational flags to control things like which database to use or which external service to call.
+
+The trade-offs: Feature flags decouple deployment from release, which is powerful. Rollback is instant - just flip the flag. You can do user-specific rollouts and sophisticated targeting. However, code complexity increases because you have multiple code paths. You accumulate technical debt from old code paths that should be removed. Both the old and new code paths must work correctly. And you have the overhead of managing flags.
+
+Use feature flags for risky features, gradual rollouts, A/B testing, and operational controls. Don't use them for simple bug fixes where there's no need for the complexity, when code paths can't coexist, or for short-lived changes where you should just use feature branches instead.
+
+An important anti-pattern to avoid: long-lived flags. Don't let feature flags live for months or years. After you've rolled out a feature to 100% of users, remove the flag and the old code path. Otherwise, you'll accumulate dead code that nobody dares remove, and your codebase becomes increasingly complex with conditionals checking flags from years ago.
+
+Database Migration Strategies
+
+Database migrations are often the hardest part of deployments. The problem is that code and database changes are interdependent. If you deploy incompatible versions, you'll get errors.
+
+The expand-contract strategy is a three-phase approach for backwards compatibility. In phase one, you expand the schema by adding new columns or tables while keeping the old ones. Your old code continues to work, writing to the old columns. Your new code writes to both old and new columns. This dual writing ensures both code versions can function. In phase two, you migrate existing data from old columns to new columns using a background job. In phase three, you contract by removing the old schema. At this point, all code must use the new columns.
+
+Let me make this concrete with an example. Suppose you want to rename a column from "phone" to "phone_number". In the expand phase, you'd add a new column called "phone_number" while keeping the old "phone" column. Your new application code would write to both columns. In the migrate phase, you'd run a background job to copy data from "phone" to "phone_number" for all existing rows. In the contract phase, after all code is using "phone_number", you'd drop the old "phone" column.
+
+This requires at least two separate deployments. You can't do this atomically because you need the dual-write code deployed before you can safely migrate data, and you need data migrated before you can drop the old column.
+
+Another strategy is dual writes, which is useful when migrating between systems rather than just schema changes. The idea is to write to both the old system and the new system during the migration. You read from the old system, which remains the source of truth, but you also read from the new system and compare the results to detect discrepancies.
+
+The implementation would have a repository that writes to both systems. When saving data, you write to the old system first, then write to the new system. If the new system fails, you log the error but don't fail the request since the new system isn't critical yet. When reading data, you read from the old system and return that result, but you also read from the new system in the background and compare results.
+
+This comparison happens asynchronously to avoid slowing down requests. You queue up comparisons for background processing, and you monitor for discrepancies. This shadow mode lets you validate the new system with real production data before fully switching over.
+
+The migration phases are: First, dual write where you write to both systems but read from old. Second, dual read where you write to both and read from both to compare. Third, switch where you write to both but read from new. And finally, cleanup where you only write to new and drop the old system.
+
+The trade-offs: You can validate the new system before fully switching, which reduces risk. Rollback is easy - just keep reading from the old system. However, you have double write cost and operational overhead. Data inconsistency is possible if writes fail in one system. And your application code becomes more complex.
+
+Rollback Strategies
+
+Let's talk about automated rollback. The idea is to automatically detect problems and rollback without human intervention. You'd have a system that deploys a new version and then monitors key metrics. If metrics exceed thresholds - like error rate above 5%, latency above 1 second, or CPU usage above 90% - the system automatically rolls back to the previous version.
+
+The implementation would monitor for a period after deployment, maybe 5 minutes. Every minute, you'd check current metrics against your thresholds. If any metric exceeds its threshold, you trigger an automatic rollback. This prevents bad deployments from causing extended outages.
+
+You can also implement a circuit breaker pattern for deployments. If you have consecutive deployment failures, the circuit breaker blocks further deployments for a period of time, maybe an hour. This prevents repeatedly breaking production when there's a systemic issue. After several failures, you'd alert the ops team and require manual intervention before deployments can resume.
+
+Deployment Strategy Comparison
+
+Let me compare these strategies across several dimensions. Rolling deployment has gradual switchover taking 10 to 60 minutes, medium rollback speed where you have to re-roll, no extra resources needed, medium risk level, and it's best for standard deploys. Blue-green has instant switchover in seconds, instant rollback, requires double the capacity, has low risk, and is best for critical services. Canary has gradual switchover over hours, fast rollback by reducing traffic percentage, needs about 10% extra capacity, has very low risk, and is best for high-risk changes. Feature flags don't really have a switchover concept, have instant rollback, need no extra resources, have very low risk, and are best for decoupled releases.
+
+Here's a decision tree to help you choose. First ask: Do you need instant rollback? If yes, use blue-green. If no, ask: Is this a high-risk change? If yes, ask: Can you monitor user impact? If yes, use canary. If no, use blue-green. If it's not a high-risk change, ask: Can you afford double the capacity? If yes, use blue-green. If no, use rolling.
+
+For most cases, the recommendation is to use rolling deployment for the deployment mechanism combined with feature flags for release control. This gives you the benefits of decoupled releases without requiring double capacity.
+
+Key Concepts Checklist
+
+Let me give you a checklist of key concepts to remember. Choose deployment strategy based on your risk tolerance and available resources. Implement proper health checks that validate actual application functionality, not just that the process is running. Design database migrations to be backwards compatible using the expand-contract pattern. Set up automated rollback based on metrics like error rate and latency. Decouple deployment from feature release using feature flags. Test your rollback procedures regularly - don't wait for a production incident to discover your rollback is broken. Monitor key metrics during deployment, including errors, latency, and business KPIs. And handle stateful services specially, considering things like sessions, WebSocket connections, and long-running jobs.
+
+Practical Insights
+
+Let me share some hard-won wisdom from real-world experience.
+
+First, health checks must validate real functionality. Don't just check if the process is running. Health checks should validate database connectivity, downstream service availability, and core functionality. A service that returns a 200 status code but can't access the database will cause an outage just the same. A bad health check just returns "status: ok" without checking anything. A good health check executes a simple database query like SELECT 1, pings the Redis cache, checks critical dependencies by making requests to downstream services with timeouts, and only then returns "status: ok".
+
+Second, deployment frequency matters more than strategy. Companies deploying ten times per day have fundamentally different needs than those deploying weekly. High-frequency deployments favor simpler strategies like rolling with extensive automation. Low-frequency deployments can afford more complex strategies like blue-green with manual validation steps.
+
+Third, database migrations are the hard part. Most deployment strategy complexity comes from database changes. The rule of thumb is that any schema change requires at least two deployments - one to expand, one to contract. Never deploy breaking database changes atomically with code. The expand-contract pattern isn't elegant, but it's the only safe way to maintain zero-downtime.
+
+Fourth, rollback is a deployment. Rollback isn't a magic undo button. It's deploying the previous version, which means it has all the risks of a regular deployment. This is why instant rollback strategies like blue-green and feature flags are so valuable. They're not actually deploying anything - they're just changing routing or configuration.
+
+Fifth, feature flags accumulate as technical debt. Every feature flag doubles your code paths because you have the flag-on path and the flag-off path. After six months, you have two to the power of n combinations to test, where n is the number of flags. Be disciplined about removing flags after rollout completes. Set calendar reminders to clean up flags two weeks after reaching 100% rollout. Otherwise, you'll have a codebase full of conditionals checking flags from 2020 that nobody dares remove.
+
+Sixth, canary analysis requires statistical rigor. Don't just eyeball metrics. A 10% canary means a small sample size, which means high variance. Use statistical significance tests or wait for enough samples. False positives, where you rollback good deployments, are expensive. False negatives, where you don't catch bad deployments, are catastrophic. When in doubt, err on the side of false positives.
+
+Finally, state makes everything harder. WebSocket connections, in-progress uploads, active sessions - all of these make switchover complex. Blue-green deployment with instant switchover will drop WebSocket connections. Rolling deployment means some users switch environments mid-session. Solutions include session affinity using sticky sessions, graceful connection draining where you wait 30 to 60 seconds for connections to close, or state externalization where you store session data in Redis instead of in application memory.
+
+That concludes our chapter on deployment strategies. Remember that the goal is to deploy changes safely and quickly, with the ability to rollback when things go wrong. Choose the strategy that fits your risk tolerance, resources, and operational constraints.

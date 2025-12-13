@@ -1,0 +1,191 @@
+Chapter 15: Time-Series Databases
+
+The Problem
+
+Imagine you're running an Internet of Things platform that monitors 50,000 smart thermostats. Each device sends temperature, humidity, and battery level readings every 60 seconds. Let's do the math on that: 3 metrics times 50,000 devices times 60 readings per hour equals 9 million data points per hour, or 216 million data points per day.
+
+After 3 months of using PostgreSQL to store this data, here's what happens. When you try to run a simple query to get the average temperature for a single device over the last 7 days, that query takes 45 seconds to complete. Why? Because it has to perform a table scan of 19 billion rows. Your disk usage has ballooned to 4.2 terabytes, mostly eaten up by indexes. And your write throughput has degraded dramatically, from 500 inserts per second down to just 150 inserts per second.
+
+This is time-series data, and regular databases were not built for this kind of workload.
+
+What Makes Time-Series Data Special?
+
+Time-series data has unique characteristics that set it apart from typical database workloads. Let's walk through the four key characteristics.
+
+First, time-series data involves append-only writes. Data arrives in time order, you never update past values because they're immutable, and DELETE operations are rare. When you do delete, it's through retention policies, not random deletes of individual records.
+
+Second, time-series queries are almost always time-ordered. Nearly all queries have time range filters, recent data is accessed far more frequently than old data, and you're typically performing aggregations over time windows like hourly or daily averages. For example, you might query temperature readings with device equals device 123, room equals bedroom, and floor equals 2.
+
+Third, you have high cardinality. That means many unique series, where each series represents a unique combination of tags or labels. For instance, you might track temperature for many devices, each in different rooms, on different floors.
+
+Fourth, time-series workloads have high write volume but lower read volume. You might have millions of writes per second, while reads are more analytical in nature, like dashboards and alerts.
+
+Regular databases like PostgreSQL and MySQL are optimized for random reads and writes, updates in place, complex joins, and ACID transactions. In contrast, time-series databases optimize for sequential writes, immutable data, efficient time-range scans, and compression.
+
+Storage Optimization
+
+Let's talk about how time-series databases optimize storage, starting with columnar storage.
+
+Columnar Storage
+
+The problem with row-oriented storage is that it wastes input/output operations when you're querying just a single column. In traditional row-oriented storage, you might have Row 1 containing timestamp T1, device D1, temperature 20, and humidity 45. Row 2 has timestamp T2, device D1, temperature 21, humidity 46. Row 3 has timestamp T3, device D2, temperature 19, humidity 50. When you query for the average temperature, you must read all columns even though you only need the temperature column.
+
+With columnar storage, data is organized differently. You have one column for timestamps containing T1, T2, T3. Another column for devices containing D1, D1, D2. And a separate column for temperature containing 20, 21, 19. When you query for average temperature, you only read the temperature column, which means much less input/output.
+
+Compression Techniques
+
+Time-series databases use several clever compression techniques. Let's start with delta-of-delta encoding.
+
+Temperature readings are usually close to previous values, which means we can use delta encoding. Instead of storing raw timestamp values like 1609459200, 1609459260, 1609459320, 1609459380, which each take 4 bytes, we can store the delta, or difference from the previous value. That gives us 1609459200, 60, 60, 60. But we can go one step further with delta-of-delta encoding, which stores the difference of the deltas. That gives us 1609459200, 60, 0, 0, 0. We store the base value, the first delta, and then mostly zeros. Zeros compress extremely well, giving us a 96% compression ratio.
+
+Another technique is Gorilla compression, which was developed by Facebook and is used by Prometheus and InfluxDB for floating point numbers. Let's say you have temperature readings of 20.5, 20.6, 20.5, 20.7, 20.6. You store the first value as-is, which is 20.5. For subsequent values, you XOR them with the previous value. When you XOR 20.6 with 20.5, you get a small number because they have similar bits. Then you store only the differing bits. This typically achieves 1.37 bytes per data point, compared to 8 bytes for a full 64-bit float.
+
+Run-length encoding is used for repeated values. If you have a status field with values 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, you can store this as three value-count pairs: the value 1 appearing 5 times, then 0 appearing 3 times, then 1 appearing 2 times.
+
+Downsampling and Retention
+
+The problem with storing raw data forever is that it's expensive and often unnecessary. Here's a typical retention strategy:
+
+For the first 7 days, you keep raw data at 1-second resolution. That's useful for detailed debugging. 7 days times 86,400 seconds per day gives you 604,800 data points. After 7 days, hourly averages are usually sufficient. That's just 24 hours times 365 days, or 8,760 points. After 1 year, daily aggregates are sufficient, which is only 365 points.
+
+Continuous Aggregation
+
+Time-series databases provide ways to automatically downsample data. In InfluxDB, you create retention policies and continuous queries. For example, you might create a retention policy called "raw" that keeps data for 7 days with replication factor 1. You create another policy called "hourly" that keeps data for 90 days. And a "daily" policy that keeps data for 5 years.
+
+Then you create a continuous query called "downsample hourly" that automatically aggregates raw data into hourly buckets. This query selects the mean, max, and min temperature, and inserts them into the hourly retention policy's table, grouped by 1-hour time windows and device ID.
+
+You can implement this in Python with a RetentionManager class that handles both downsampling and expiring old data. The downsample hourly method aggregates the last hour of raw data by using date truncation to create hourly buckets, then calculating average, max, and min temperatures grouped by hour and device ID. The expire old data method deletes data outside retention windows by calculating cutoff timestamps based on each policy's duration and running DELETE queries. You'd run the downsampling every hour and the expiration daily as cron jobs.
+
+InfluxDB Architecture
+
+InfluxDB uses a specific data model with measurements, tags, and fields.
+
+Data Model: Tags versus Fields
+
+In InfluxDB, a measurement is like a table, such as "temperature". Tags are indexed metadata like device ID, location, and room. Fields are the actual values like temperature and humidity. Timestamps have nanosecond precision.
+
+Here's an example line of data: "temperature, device equals dev 123, room equals bedroom, floor equals 2, value equals 20.5, followed by the timestamp 1609459200000000000". The measurement is "temperature", the tags are device, room, and floor, which are indexed. The field is "value" which is not indexed. And the timestamp is in nanoseconds.
+
+Write Path
+
+When a write request comes into InfluxDB, it first goes to the Write Ahead Log, or WAL, which provides durability. Then it goes to an in-memory cache that's time-ordered, which enables fast writes. Finally, it gets flushed to TSM files, which stands for Time-Structured Merge tree. These files use compressed columnar storage on disk.
+
+You can write to InfluxDB using the line protocol in Python. You create a client, then create Point objects. Each point has a measurement name like "temperature", tags like device and room, fields like value, and a timestamp. For efficiency, you should batch writes together. Instead of writing 1,000 individual points, you create a list of points and write them all at once.
+
+For querying, InfluxDB uses the Flux query language. You might write a query that selects from the sensors bucket, filters to the last hour's data, filters for the temperature measurement and a specific device, then calculates the mean.
+
+TimescaleDB: SQL for Time-Series
+
+TimescaleDB is a PostgreSQL extension, which means you get SQL plus time-series optimizations.
+
+Hypertables
+
+The problem is that a single PostgreSQL table becomes slow with billions of rows. TimescaleDB's solution is automatic partitioning by time, using what they call "hypertables".
+
+A hypertable appears as a single table to the user, but under the hood it's split into chunks. Chunk 1 might contain data from January 1st through 7th, Chunk 2 from January 8th through 14th, and Chunk 3 from January 15th through 21st. Each chunk is a regular PostgreSQL table.
+
+When you query for the average temperature over the last 7 days, TimescaleDB only scans the relevant chunks for that week, not the entire table.
+
+Setup and Usage
+
+Setting up TimescaleDB in Python is straightforward. You connect to PostgreSQL, create a regular table with columns for timestamp, device ID, temperature, and humidity. Then you convert it to a hypertable by calling the create hypertable function with the table name and timestamp column.
+
+Inserting data works exactly like regular PostgreSQL. The power comes from continuous aggregates, which are materialized views that automatically update. You create a materialized view for hourly sensor data that uses the time bucket function to group data into 1-hour intervals, then calculates average, max, and min temperature grouped by hour and device ID.
+
+You can add a refresh policy that automatically updates this materialized view every hour. And you can add a retention policy that automatically deletes data older than 90 days.
+
+Querying uses standard SQL, which is a major advantage if your team already knows SQL.
+
+When to use TimescaleDB: if you already use PostgreSQL, you need SQL and the existing PostgreSQL ecosystem like pgAdmin, you want to join time-series data with relational data, or you need ACID transactions.
+
+When NOT to use TimescaleDB: if you have a pure time-series workload where InfluxDB may be faster, or if you don't need SQL since InfluxDB's Flux language is simpler for time-series operations.
+
+Prometheus: Metrics Monitoring
+
+Prometheus is designed specifically for monitoring infrastructure and applications.
+
+Data Model
+
+In Prometheus, data follows this format: metric name with labels, followed by a value and timestamp. For example, "http requests total" with labels for method equals GET, endpoint equals slash api slash users, status equals 200, followed by the value 1234 and a timestamp. The labels can have high cardinality, meaning many unique combinations.
+
+Metric Types
+
+Prometheus supports several metric types. A Counter only increases, and resets on restart. You might track total HTTP requests, incrementing the counter for each method and endpoint combination.
+
+A Gauge can go up or down. You might use this for room temperature, setting it to 20.5 degrees for the bedroom and 22.3 for the kitchen.
+
+A Histogram uses buckets for distributions. You might track HTTP request duration with buckets at 0.1, 0.5, 1.0, 2.5, 5.0, and 10.0 seconds. This generates data showing how many requests fell into each bucket. For example, 100 requests under 0.1 seconds, 250 under 0.5 seconds, 400 under 1.0 seconds, and so on.
+
+PromQL Query Language
+
+Prometheus uses PromQL for queries. You can calculate the rate of HTTP requests per second over the last 5 minutes. You can get the 95th percentile request duration using the histogram quantile function. You can sum CPU usage by instance. And you can create alerts, like triggering when the rate of 5xx status codes exceeds 5%.
+
+Pull versus Push
+
+Prometheus pulls metrics from targets, which is different from push-based systems. The Prometheus server makes HTTP GET requests to a /metrics endpoint every 15 seconds. Applications expose this metrics endpoint.
+
+Why use pull? Prometheus controls the scrape frequency, can use service discovery to automatically find targets, and can detect when a target is down.
+
+For short-lived jobs like batch processes or cron jobs, you can use a Pushgateway to push metrics instead.
+
+Cardinality Explosion: The Silent Killer of Time-Series Databases
+
+Cardinality is the number of unique time series, and it can quickly become a major problem.
+
+Let's say you have a metric called http requests total with labels for method, endpoint, status, and user ID. If you have 5 HTTP methods, 100 endpoints, 5 status codes, and 10,000 users, your cardinality is 5 times 100 times 5 times 10,000, which equals 25 million unique series.
+
+Each series uses memory for indexing. In InfluxDB, that's roughly 1 to 3 kilobytes per series in memory. 25 million series times 2 kilobytes means 50 gigabytes of RAM just for the index.
+
+Anti-Pattern: User ID in Labels
+
+Never put user IDs in labels or tags. This creates unbounded cardinality. With 1 million users, you'd have 1 million unique series.
+
+The correct pattern is to use fields, not tags, for high-cardinality data in InfluxDB. Put the user ID as a field value, not a tag. In Prometheus, aggregate at query time. Don't use user ID as a label at all. Instead, track total requests and filter logs for specific users when needed.
+
+You should monitor cardinality regularly. In InfluxDB, you can show series cardinality. In Prometheus, you can query the status endpoint. Alert when you hit high cardinality thresholds.
+
+Rules of thumb: keep cardinality per metric under 100,000, keep total cardinality under 10 million, and if you need user-level data, use logs or a separate analytics database.
+
+Comparison of Time-Series Databases
+
+Let's compare the major time-series databases across key dimensions.
+
+For query language: InfluxDB uses Flux or InfluxQL. TimescaleDB uses full SQL. Prometheus uses PromQL. ClickHouse uses SQL. And QuestDB uses SQL.
+
+For storage: InfluxDB uses a custom TSM format. TimescaleDB uses PostgreSQL tables. Prometheus has a custom time-series database. ClickHouse uses columnar storage. QuestDB uses columnar storage.
+
+For compression: InfluxDB uses Gorilla and delta-of-delta encoding. TimescaleDB uses PostgreSQL compression plus custom optimizations. Prometheus uses Gorilla. ClickHouse uses LZ4 and ZSTD. QuestDB uses LZ4.
+
+For maximum cardinality: InfluxDB and Prometheus handle around 10 million series. TimescaleDB can handle around 100 million series. ClickHouse can handle billions. QuestDB handles around 10 million series.
+
+For write throughput: InfluxDB achieves 500,000 points per second. TimescaleDB achieves 150,000 rows per second. Prometheus achieves 1 million samples per second. ClickHouse achieves over 1 million rows per second. QuestDB achieves 1.4 million rows per second.
+
+InfluxDB is best for general-purpose time-series, IoT, and sensor data. Avoid it if you require SQL or have ultra-high cardinality.
+
+TimescaleDB is best when you need SQL, want to join with relational data, or have an existing PostgreSQL stack. Avoid it for pure time-series workloads where InfluxDB may be faster.
+
+Prometheus is best for monitoring infrastructure, Kubernetes, and microservices. Avoid it for long-term storage, where you should use Thanos or Cortex, and for general time-series use cases.
+
+ClickHouse is best for analytics, high cardinality, and complex aggregations. Avoid it for simple time-series where it's overkill.
+
+QuestDB is best for financial data like tick data and ultra-fast ingestion. Avoid it for complex queries or when you need a mature ecosystem.
+
+Key Concepts Checklist
+
+Here are the key concepts you should be able to explain. First, explain time-series data characteristics: append-only writes, time-ordered queries, and high cardinality. Second, describe columnar storage and compression techniques like delta-of-delta and Gorilla encoding. Third, design retention policies and downsampling strategies. Fourth, compare InfluxDB's tags versus fields data model. Fifth, explain TimescaleDB's hypertables and continuous aggregates. Sixth, describe Prometheus metric types: counter, gauge, and histogram. Seventh, identify cardinality explosion risks and how to mitigate them. Eighth, choose the appropriate time-series database for different use cases, comparing InfluxDB, TimescaleDB, and Prometheus.
+
+Practical Insights
+
+Let me share some battle-tested wisdom from running time-series databases in production.
+
+Cardinality is your enemy. Monitor series count religiously. A single bad metric with unbounded labels like user IDs, request IDs, or IP addresses can bring down your entire time-series database. Use fields or values, not tags or labels, for high-cardinality data. In Prometheus, if you need per-user metrics, you're using the wrong tool. Use application logs or a dedicated analytics database instead.
+
+Start with a retention strategy from day one. A typical strategy is: keep raw data for 7 to 30 days for debugging and incident response. Keep hourly rollups for 90 days for trend analysis. Keep daily rollups for 2 to 5 years for long-term trends and capacity planning. Don't wait until you have 10 terabytes of data to implement retention. Disk is cheap, but time-series database performance degrades with dataset size. Delete old data proactively.
+
+Batch writes, don't write individual data points. If you write 1,000 readings individually, that's 1,000 network round-trips, which is very slow. Instead, batch those writes together into one network round-trip, which is 10 to 100 times faster. The sweet spot for batch size is 5,000 to 10,000 points per batch. Larger batches risk timeout or memory issues.
+
+Pre-aggregate when possible. Don't store every single data point if you don't need it. If you only ever query hourly averages, store hourly averages. Raw data is useful for debugging, but 99% of queries are aggregates. Use continuous aggregates in TimescaleDB or recording rules in Prometheus.
+
+Know when NOT to use a time-series database. Time-series databases are optimized for time-series queries, but they're not universal solutions. If you need complex joins across multiple entities, use PostgreSQL or MySQL. If you need full-text search, use Elasticsearch. For user behavior analytics, use ClickHouse or a data warehouse. For real-time alerting on complex patterns, use a stream processor like Flink. Many production systems use a combination: a time-series database for metrics, PostgreSQL for metadata, and S3 for raw event logs.
+
+Finally, monitor your monitoring system. Your time-series database is critical infrastructure. Monitor write throughput in points per second. Monitor query latency at the 95th and 99th percentiles. Monitor disk usage growth rate. Monitor series cardinality. Monitor memory usage, especially index size. Alert on degradation before it becomes an outage. A slow time-series database means blind operators during an incident, which is the worst possible time to lose observability.

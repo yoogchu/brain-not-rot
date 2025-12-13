@@ -1,0 +1,153 @@
+Chapter 31: RAG Architectures
+
+Why RAG?
+
+To understand why we need RAG, or Retrieval Augmented Generation, we need to understand the fundamental problems with vanilla large language models. First, they have a knowledge cutoff, meaning they don't know about recent events. Second, they hallucinate, making up facts with complete confidence. Third, they have no access to private data like your documentation or codebase. And fourth, they provide generic responses that aren't tailored to your specific domain.
+
+RAG provides a solution to these problems. The approach is simple: retrieve relevant context, augment the prompt with that context, then generate an answer. For example, when a user asks "What's our refund policy?", the system first retrieves the relevant chunks from the refund policy documentation. Then it augments the prompt by saying "Given this context about the refund policy, answer: What's our refund policy?". Finally, the large language model generates a grounded answer based on that retrieved context.
+
+Basic RAG Pipeline
+
+A RAG system consists of two main pipelines: an indexing pipeline that runs offline, and a query pipeline that runs online when users ask questions.
+
+The indexing pipeline works like this. First, you take your documents and chunk them into smaller pieces. Then you embed those chunks, converting them into numerical vectors. Finally, you store those vectors in a vector database. This happens offline, before any users interact with your system.
+
+The query pipeline happens in real-time. When a user submits a query, you embed that query into the same vector space. Then you search the vector database to find the most similar chunks. You retrieve the top K chunks, augment the user's query with that context, and send it to the large language model to generate the final answer.
+
+Step 1: Document Chunking
+
+The first challenge is that documents are often too long to fit in the context window of a language model. The solution is to split them into overlapping chunks.
+
+A simple chunking strategy might work like this. You define a chunk size, say 512 tokens, and an overlap amount, say 50 tokens. Starting from the beginning of the document, you take chunks of 512 tokens, but instead of moving forward by the full 512, you only move forward by 462 tokens. This means each chunk overlaps with the previous one by 50 tokens. The overlap is crucial because it prevents cutting off content mid-sentence or mid-thought.
+
+However, a better approach is semantic chunking, where you respect the document structure. This means splitting by paragraphs, sections, or sentences. You keep headers with their content, and respect code blocks and tables as complete units rather than splitting them arbitrarily.
+
+When it comes to chunk size, there are trade-offs to consider. Small chunks, around 256 tokens, give you precise retrieval because they're focused on specific topics. However, they may miss important context. Medium chunks, around 512 tokens, provide a balance and are the most common choice. Large chunks, around 1024 tokens, provide more context but are less precise, and you can fit fewer of them in your prompt.
+
+Step 2: Embedding
+
+Once you have your chunks, you need to convert them into embeddings. An embedding is simply a numerical vector representation of text. You can use an API like OpenAI's to create these embeddings.
+
+The process is straightforward. You send your text to the embedding API, specifying which model to use, such as text-embedding-3-small. The API returns a high-dimensional vector, typically 1536 dimensions for this model. You do this for every chunk in your document.
+
+Popular embedding models have different characteristics. OpenAI's text-embedding-3-small produces 1536-dimensional vectors and is fast with good quality. The text-embedding-3-large model produces 3072-dimensional vectors, is medium speed, but has better quality. Cohere's embed-v3 produces 1024-dimensional vectors and is fast with good quality. BGE-large is an open-source option that produces 1024-dimensional vectors with medium speed and good quality.
+
+Step 3: Vector Storage
+
+After embedding your chunks, you need to store them in a vector database. Using a service like Pinecone, you initialize the database with your API key and environment. Then you create vectors that include the embedding values along with metadata.
+
+The metadata is crucial. For each chunk, you store not just the embedding vector, but also the original text, the source document, and other relevant information like the page number. This metadata is stored alongside the vector so that when you retrieve relevant chunks later, you get back the original text along with information about where it came from.
+
+You insert these vectors into the database using an upsert operation, which either inserts new vectors or updates existing ones if they already exist.
+
+Step 4: Retrieval
+
+When a user asks a question, the retrieval process begins. First, you embed the user's query using the same embedding model you used for the documents. This ensures the query lives in the same vector space as your document chunks.
+
+Then you search the vector database by passing in the query embedding and specifying how many results you want, typically the top 5 or top 10 most similar chunks. The database returns matches ranked by similarity, and you extract the text of those chunks from the metadata.
+
+Step 5: Augmented Generation
+
+The final step brings everything together. You retrieve the relevant chunks for the user's query, typically the top 5. Then you build a prompt that includes this context.
+
+The prompt structure is important. You provide clear instructions to the language model, saying something like "Answer the question based on the provided context. If the answer is not in the context, say I don't have that information." Then you include all the retrieved chunks as context, followed by the user's question.
+
+You send this augmented prompt to the language model with a low temperature setting, typically zero, to get deterministic, factual answers rather than creative ones. The model generates an answer that's grounded in the retrieved context.
+
+Advanced RAG Patterns
+
+Hybrid Search
+
+Vector search alone has limitations. It can miss exact matches that are important. For example, if a user searches for "Error code E-5012", vector search will find semantically similar errors, but might not prioritize the exact error code. Keyword search using an algorithm like BM25 will find that exact match.
+
+Hybrid search combines both approaches. You run both vector search for semantic similarity and BM25 search for keyword matching. Then you merge the results using a technique called Reciprocal Rank Fusion.
+
+Here's how it works. You retrieve the top 20 results from both vector search and BM25 search. For each result, you calculate a score based on its rank in each result set. The score for each document is the sum of one over the rank plus a constant, typically 60. You do this for both search methods, weighting vector search and BM25 according to an alpha parameter, typically 0.5 for equal weighting. Finally, you sort all documents by their combined score to get the merged results.
+
+Reranking
+
+Another limitation is that embedding similarity doesn't always equal true relevance. The solution is to use a cross-encoder reranker.
+
+The strategy is a two-stage retrieval process. First, you use fast vector search to retrieve a large candidate set, maybe the top 100 documents. This is fast but approximate. Then, you use a slow but accurate cross-encoder model to rerank those 100 candidates. Finally, you return only the top 10 highest-scoring documents.
+
+A cross-encoder model takes both the query and each document as input and produces a relevance score. Unlike bi-encoders that embed query and document separately, cross-encoders can capture interaction between them. For each query-document pair, the cross-encoder predicts a score. You sort all documents by this score and return the highest-ranked ones.
+
+Query Expansion
+
+Sometimes the user's query doesn't match the terminology used in your documents. Query expansion solves this by generating multiple variations of the query.
+
+For example, if a user asks "How to fix login issues?", you might expand this into several alternatives: "authentication problems troubleshooting", "sign in error solutions", and "login failure debugging". You retrieve results for all of these queries and merge them together.
+
+You can use a language model to generate these alternative phrasings. You simply prompt it to generate three alternative ways to phrase the search query, then combine the original query with these alternatives for retrieval.
+
+Contextual Compression
+
+Another common problem is that retrieved chunks often contain irrelevant portions. The solution is contextual compression, where you extract only the relevant parts.
+
+Imagine you retrieve a 500-token chunk that says "The company was founded in 1995" followed by lots of history, then "Our refund policy allows returns within 30 days", followed by more irrelevant text. After compression, you'd extract just the relevant sentence: "Our refund policy allows returns within 30 days." This reduces the context you send to the language model and makes it more focused.
+
+Vector Databases
+
+Choosing the right vector database depends on your needs. Pinecone is a managed service that's easy to use and scalable, making it good for production at any scale. Weaviate is an open-source option with hybrid search built in, good for self-hosting. Qdrant is another open-source database known for performance and filtering capabilities. Pgvector is a PostgreSQL extension that works well if you already use Postgres and have simple use cases. Chroma is an embedded database that's easy for prototyping and development. Milvus is an open-source option designed for large scale, handling billions of vectors.
+
+These databases use different index types for efficient search. HNSW, which stands for Hierarchical Navigable Small World, builds in O of n log n time and searches in O of log n time. It uses high memory because it stores a graph structure, but it's best for most use cases. IVF, or Inverted File Index, builds in O of n time and searches in O of square root of n time. It uses lower memory and is best for large datasets where memory is constrained. Product Quantization compresses vectors, trading some accuracy for much lower memory usage. It's best for very large datasets.
+
+LLM Serving
+
+Key Optimizations
+
+When serving large language models for RAG applications, several optimizations are crucial. The first is KV caching, which solves a fundamental inefficiency. In a transformer model, without caching, when you generate token 100, you compute attention for tokens 1 through 99. Then when you generate token 101, you recompute attention for tokens 1 through 100 all over again.
+
+With KV cache, you store the key and value tensors from previous tokens in memory. When generating a new token, you only compute attention for that new token, reusing the cached values for all previous tokens. This dramatically speeds up generation.
+
+Continuous batching is another important optimization. Traditional batching means a batch waits for the longest sequence to finish before processing new requests. This is inefficient because shorter sequences in the batch finish early but sit idle.
+
+Continuous batching allows new requests to join the batch as old ones finish. As soon as one request completes, another can take its place in the batch. This keeps GPU utilization high and reduces average latency.
+
+Speculative decoding is a clever technique that uses a small, fast model to draft multiple tokens, then a large, accurate model to verify them in a single forward pass. The draft model might generate 8 tokens quickly. Then the large model verifies all 8 in parallel. If 6 out of 8 match what the large model would have generated, you accept those 6 and regenerate from there. When the draft and target models are well-matched, this can give you about a 4x speedup.
+
+Quantization reduces memory by using fewer bits per weight. Full precision FP32 uses 32 bits per weight. FP16 uses 16 bits, giving you 2x memory savings. INT8 uses 8 bits, giving you 4x memory savings. INT4 uses only 4 bits, giving you 8x memory savings. The trade-off is some quality loss at lower precision, but for many applications the loss is acceptable.
+
+Serving Frameworks
+
+Several frameworks exist for serving large language models in production. vLLM is known for continuous batching and an optimization called PagedAttention, making it great for production use. TGI, or Text Generation Inference, has tight integration with Hugging Face and works well for Hugging Face models. Triton supports multiple models and advanced GPU optimization, making it good for complex pipelines. Ollama is designed for local development and testing.
+
+Evaluation
+
+RAG Metrics
+
+Evaluating a RAG system requires measuring both retrieval quality and generation quality. For retrieval, you can measure Precision at K, which tells you what percentage of retrieved documents are actually relevant. Recall at K tells you what percentage of all relevant documents were successfully retrieved. Mean Reciprocal Rank measures how high the first relevant result is ranked.
+
+For generation quality, you measure faithfulness, which asks whether the answer matches the retrieved context. You measure relevance, which asks whether the answer actually addresses the question. And you measure completeness, which asks whether all parts of the question were answered.
+
+RAGAS Framework
+
+The RAGAS framework provides tools to evaluate RAG pipelines automatically. You can evaluate your system on a dataset using metrics like faithfulness, answer relevancy, and context precision.
+
+Faithfulness might score 0.92, meaning the answer is well-grounded in the context 92% of the time. Answer relevancy might score 0.88, meaning the answer addresses the question 88% of the time. Context precision might score 0.75, meaning the retrieved context is relevant 75% of the time. These metrics help you identify weaknesses in your pipeline.
+
+Production Considerations
+
+Caching
+
+In production, caching is essential for performance and cost. A semantic cache stores answers to similar questions. When a new query comes in, you first check the semantic cache. If the query is similar enough to a previously-answered question, you return the cached answer. This is a cache hit and you skip the expensive RAG pipeline. If there's no match, that's a cache miss, and you run the full RAG pipeline and cache the result for future similar queries.
+
+Guardrails
+
+Production RAG systems need guardrails to ensure safety and quality. On the input side, you check if the query is harmful and refuse to answer if it is. After generating an answer, you apply output guardrails. You check if the answer contains personally identifiable information and redact it if necessary. You also check for hallucinations by verifying the answer against the retrieved context. If the model appears to be making things up, you return a message saying you don't have enough information to answer.
+
+Key Concepts Checklist
+
+Let's review the key concepts you should understand. First, explain the basic RAG pipeline components: chunking, embedding, storage, retrieval, and generation. Second, describe chunking strategies and their trade-offs, including simple fixed-size chunking versus semantic chunking. Third, explain embedding models and vector search, including how similarity works in high-dimensional space. Fourth, know about hybrid search combining vector and keyword search, and reranking using cross-encoders. Fifth, describe LLM optimization techniques like KV cache and continuous batching. And sixth, discuss evaluation metrics for RAG systems, including both retrieval and generation quality.
+
+Practical Insights
+
+Let me share some practical insights from real-world RAG implementations. For chunking strategy, start with 512 tokens and 50 tokens of overlap as a baseline. Consider your document structure when chunking; don't split things arbitrarily. Include metadata like source, page number, and section with each chunk. Most importantly, test different chunk sizes with your actual data to see what works best.
+
+For embedding model selection, choose a model whose training domain matches your domain. Benchmark several models on your actual queries, not on generic benchmarks. Consider the trade-off between latency and quality; sometimes a faster model that's slightly less accurate is better for user experience. For specialized domains, consider fine-tuning an embedding model on your data.
+
+When scaling RAG, you'll encounter several bottlenecks. First is the embedding API. Solutions include batching requests, caching embeddings for common queries, or self-hosting your embedding model. Second is vector search. Tune your index parameters, and consider sharding across multiple machines for very large datasets. Third is LLM inference. Use caching for common questions, streaming for better perceived latency, or smaller models for simpler queries. Fourth is reranking, which can be slow. Batch reranking requests and prune candidates before reranking to reduce the workload.
+
+Finally, let's talk about common failure modes and how to address them. If wrong chunks are being retrieved, improve your chunking strategy or try hybrid search. If the right chunks are retrieved but the model gives wrong answers, work on your prompts or add reranking. If responses are too slow, add caching, use streaming, or switch to smaller models. If you're seeing hallucinations, use stricter prompts and add fact verification guardrails.
+
+This concludes Chapter 31 on RAG Architectures.

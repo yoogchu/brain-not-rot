@@ -1,0 +1,299 @@
+Chapter 20: Microservices Patterns
+
+The Microservices Migration That Wasn't
+
+Imagine your monolithic e-commerce platform serves ten thousand orders per day with a six-person engineering team. Before the migration, your monolith had a deployment time of just fifteen minutes. All dependencies lived in one repository, making it straightforward to track everything. When bugs occurred, they were easy to debug with simple stack traces. Your team velocity was around five features per week.
+
+Fast forward six months after starting a so-called microservices transformation. Now you have forty-seven services, and nobody knows what twelve of them actually do. Creating a single order requires a three-hop distributed transaction. Deployment time has ballooned to two hours because you need to coordinate service versions. When something goes wrong, the first question is always: which service logged this error? Team velocity has dropped to just one feature per week. New hires need three weeks just to understand the system architecture.
+
+When the CEO asks why velocity dropped eighty percent, you realize something went terribly wrong.
+
+Microservices solve real problems at scale, but they also create new problems. Understanding when and how to use them is absolutely critical for senior engineers.
+
+Conway's Law and Service Boundaries
+
+Conway's Law states that your system architecture mirrors your organization's communication structure. This is not just theory; it's a fundamental reality you'll encounter in practice.
+
+Consider the difference between a monolith team and a microservices team. In a monolith team, you might have six engineers working on one codebase with one database. They hold a daily standup, and when someone says "add feature X," the team changes three files and ships the feature in two days.
+
+In contrast, a microservices team has separate teams for different services. You might have an Order Team with two developers, a User Team with two developers, and a Payment Team with two developers. These teams hold weekly sync meetings. When someone needs an API change, it requires cross-team tickets and takes two weeks to ship instead of two days.
+
+The key insight here is: don't design microservices until you have teams to own them. Service boundaries should follow team boundaries, not the other way around.
+
+Service Decomposition Strategies
+
+Domain-Driven Design
+
+The fundamental problem with splitting a monolith is: how do you do it without creating a distributed mess? Domain-Driven Design, or DDD, provides the answer through the concept of bounded contexts.
+
+Think of an e-commerce domain map. You have an Order Management Context that contains the Order as an aggregate root, along with OrderLine and ShippingAddress. This context handles commands like CreateOrder and CancelOrder. The Order references a customer ID, which connects it to the Customer Context.
+
+The Customer Context has Customer as its aggregate root, along with CustomerProfile and PaymentMethod. It handles commands like CreateCustomer and UpdateProfile. The Order also references a payment ID, connecting it to the Payment Context.
+
+The Payment Context has Payment as its aggregate root, with Transaction and Refund entities. It handles commands like AuthorizePayment and CapturePayment.
+
+The critical data ownership rules are: each context owns its data completely, there's no direct database access across contexts, and they only communicate via APIs or events.
+
+In implementation, an Order Service would own orders and maintain references to other services via HTTP clients. When creating an order, it first validates that the customer exists by making a cross-service call. If the customer doesn't exist, it throws an error. It then calculates the total price, creates the order in its own database with a PENDING status, publishes an OrderCreated event for other services to consume, and returns the order.
+
+By Team Structure
+
+Another decomposition strategy follows Conway's Law directly. Your team structure determines your service boundaries.
+
+For example, a Frontend Team might own a Backend for Frontend service, or BFF, that aggregates data from backend services. A Checkout Team owns the Order Service and Cart Service, owning the entire checkout flow end-to-end. A Payments Team owns the Payment Service and Fraud Detection Service, owning all money movement.
+
+Each team deploys independently, has an on-call rotation for their services, and decides their tech stack within company guidelines.
+
+Comparing Architectures
+
+Let's compare monoliths, microservices, and modular monoliths across several dimensions.
+
+For deployment: a monolith deploys as one unit, microservices deploy as independent services, and a modular monolith deploys as one unit with modular code.
+
+For scaling: a monolith scales the entire app together, microservices can scale services independently, and a modular monolith scales the entire app.
+
+For team autonomy: monoliths have low autonomy due to code conflicts, microservices have high autonomy through service ownership, and modular monoliths have medium autonomy through module ownership.
+
+For complexity: monoliths are low complexity, microservices are high complexity due to distribution, and modular monoliths are medium complexity.
+
+For data consistency: monoliths have easy ACID transactions, microservices have hard eventual consistency, and modular monoliths have easy ACID transactions.
+
+For debugging: monoliths are easy with one stack trace, microservices are hard requiring distributed traces, and modular monoliths are easy with one stack trace.
+
+For initial velocity: monoliths are high, microservices are low due to infrastructure overhead, and modular monoliths are high.
+
+For velocity at scale: monoliths are low due to merge conflicts, microservices are high enabling parallel work, and modular monoliths are medium.
+
+When to use microservices: you have five or more independent teams, different services have different scaling needs, and you need deployment independence.
+
+When to use a modular monolith: you have two to five teams, you want team boundaries without distributed complexity.
+
+When to use a plain monolith: you have one team, domain boundaries are unclear, or the codebase is under fifty thousand lines.
+
+When NOT to use microservices: you have fewer than three teams, domain boundaries are unclear, you lack DevOps maturity in areas like CI/CD and observability, or you're a startup still finding product-market fit.
+
+Saga Pattern: Distributed Transactions
+
+The problem: you need to update data across multiple services atomically, but distributed transactions using two-phase commit don't scale well.
+
+Choreography-Based Saga
+
+In choreography-based sagas, services react to events without a central coordinator.
+
+Here's how an order creation flow works with choreography. The Order Service creates an order with PENDING status and publishes an OrderCreated event. This event goes to an event bus like Kafka. Both the Payment Service and Inventory Service listen to this event bus. The Payment Service processes the payment and publishes a PaymentSucceeded event. The Inventory Service reserves items and publishes an ItemsReserved event. These events also go to the event bus. Finally, the Order Service listens for these success events and updates the order status to CONFIRMED.
+
+For failure handling, there's a compensation mechanism. If payment fails, a PaymentFailed event is published, and the Order Service sets the status to CANCELLED. If inventory reservation fails, an ItemsNotAvailable event is published, which triggers the Payment Service to refund, and then the Order Service cancels.
+
+In the implementation, the Order Service maintains a saga state machine. When an order is created, it sets the saga status to PAYMENT_PENDING and publishes the OrderCreated event. When a PaymentSucceeded event arrives, it updates the saga status to INVENTORY_PENDING. When an ItemsReserved event arrives, it updates the saga status to COMPLETED and the order status to CONFIRMED. If a PaymentFailed event arrives, it sets both the saga status and order status to CANCELLED.
+
+Orchestration-Based Saga
+
+In orchestration-based sagas, a central coordinator manages the saga flow.
+
+The Order Saga Orchestrator sits at the top, tracking saga progress. It coordinates with the Inventory Service, Payment Service, and Order Service. First, it reserves inventory. Second, it processes payment. Third, it updates the order. Each service replies back to the orchestrator. The orchestrator then decides: if successful, move to the next step; if failure occurs, compensate.
+
+In implementation, the OrderSagaOrchestrator maintains saga state and executes the saga in steps. Step one: reserve inventory and save the reservation ID. Step two: process payment and save the payment ID. Step three: confirm the order and mark the saga as COMPLETED.
+
+If an InventoryNotAvailable error occurs, it cancels the order and marks the saga as CANCELLED. If a PaymentFailed error occurs, it enters a COMPENSATING state, releases the inventory reservation, cancels the order, and marks the saga as CANCELLED. For any unexpected exception, it compensates all previous steps by refunding the payment if it occurred, releasing the reservation if it occurred, canceling the order, and marking the saga as FAILED.
+
+Comparing Choreography and Orchestration
+
+For coordination: choreography is decentralized using events, while orchestration is centralized in an orchestrator.
+
+For complexity: choreography spreads complexity across services, while orchestration concentrates it in the orchestrator.
+
+For coupling: choreography is loose, while orchestration is tighter since services know about the orchestrator.
+
+For debugging: choreography is hard because you have to follow the event chain, while orchestration is easier because there's one place to check.
+
+For single point of failure: choreography has none, while orchestration has the orchestrator as a potential failure point.
+
+When to use choreography: for simple workflows with two to three steps and loosely coupled services.
+
+When to use orchestration: for complex workflows with five or more steps where you need visibility and control.
+
+When NOT to use sagas: don't use them for read-heavy operations; use eventual consistency or caching instead. Don't use them for real-time consistency needs; in those cases, use a monolith or synchronous two-phase commit if throughput is below ten transactions per second.
+
+Circuit Breaker Pattern
+
+This pattern was covered in Chapter 16 but here we expand it with microservices focus.
+
+The problem: Service A depends on Service B. When Service B starts failing, Service A keeps retrying, exhausting its thread pool, and becomes unavailable too. This creates a cascading failure.
+
+Without a circuit breaker, imagine the Order Service making requests to the Payment Service. Request 1 goes to the Payment Service and times out after thirty seconds. Request 2 times out after thirty seconds. Request 3 times out after thirty seconds, and so on. Eventually, the Order Service thread pool is exhausted, and the Order Service goes DOWN. Now all users see errors, even for operations that don't need payments.
+
+With a circuit breaker implementation, you define thresholds. For example, a failure threshold of five requests, a recovery timeout of thirty seconds, and a success threshold of two requests. The circuit breaker maintains a count of failures and successes, tracks its state as CLOSED, OPEN, or HALF-OPEN, and records the last failure time.
+
+When making a call, if the circuit state is OPEN, it checks if enough time has passed since the last failure. If the recovery timeout has elapsed, it transitions to HALF-OPEN state and resets the success counter. Otherwise, it immediately throws a CircuitOpenError telling the caller to retry later.
+
+The actual service call is made with a timeout to fail fast, for example five seconds. On success, if the circuit is HALF-OPEN, it increments the success counter. If enough successes have occurred, it transitions to CLOSED state and resets the failure counter. On failure, it increments the failure counter and records the failure time. If the circuit is HALF-OPEN, it immediately transitions back to OPEN. If the failure count exceeds the threshold, it transitions to OPEN.
+
+You can combine this with fallback logic. For example, when processing an order, you try to charge the payment through the circuit breaker. If it succeeds, you return success with the payment details. If a CircuitOpenError occurs, you use a fallback strategy: accept the order but charge later by enqueueing a delayed payment, and return a pending payment status.
+
+Key metrics to monitor include: the circuit breaker state represented as a gauge where 0 means closed, 1 means open, and 2 means half-open; total failures that contributed to circuit opening as a counter; and total fallback responses served as a counter.
+
+Sidecar Pattern and Service Mesh
+
+The problem: every service needs logging, metrics, tracing, circuit breaking, retries, and TLS. Writing this in each service creates duplicated code and inconsistency.
+
+Sidecar Pattern
+
+In Kubernetes, you have a Pod that contains two containers. One is the Order Service containing business logic. The other is Envoy acting as a sidecar. Incoming traffic goes through Envoy first, which then passes it to the Order Service. Outgoing traffic from the Order Service also goes through Envoy.
+
+Envoy handles load balancing, circuit breaking, retries, timeouts, metrics like request rate and latency, distributed tracing, and TLS termination.
+
+Service Mesh
+
+A service mesh like Istio or Linkerd has two components: a control plane and a data plane.
+
+The control plane, such as Istio Control Plane, handles service discovery, traffic rules configuration, and certificate management. It configures the data plane.
+
+The data plane consists of Envoy sidecars attached to each service. For example, you have an Order Service with Envoy, a Payment Service with Envoy, and a User Service with Envoy. All service-to-service traffic goes through these sidecars.
+
+You can configure a circuit breaker for the payment service using configuration. You specify the host as payment-service and set traffic policies. For connection pooling, you might set maximum TCP connections to 100, maximum HTTP pending requests to 50, and maximum requests per connection to 2. For outlier detection, you might set consecutive errors to 5, interval to 30 seconds, base ejection time to 30 seconds, and max ejection percent to 50.
+
+Comparing In-App Libraries to Sidecar or Service Mesh
+
+For latency: in-app libraries add none, while sidecars add 1 to 2 milliseconds per hop.
+
+For memory: in-app libraries use negligible memory, while each sidecar uses 50 to 100 megabytes.
+
+For consistency: in-app libraries require each team to implement features, while service meshes enforce them centrally.
+
+For language lock-in: in-app libraries lock you to specific languages like Java or Python, while service meshes work with any language.
+
+For learning curve: in-app libraries have a low curve, while service meshes have a high curve due to new infrastructure.
+
+For debugging: in-app libraries are straightforward, while service meshes are complex due to the proxy layer.
+
+When to use service mesh: you have ten or more microservices, a polyglot environment, and need centralized observability.
+
+When NOT to use service mesh: you have fewer than five services, you have latency-critical requirements under five milliseconds, or you have a small team that can't operate the mesh.
+
+API Composition and BFF
+
+The problem: a mobile app needs data from five services. Making five HTTP calls from the mobile device is slow and drains battery.
+
+API Gateway for Simple Composition
+
+The mobile app makes one request to an API Gateway. The gateway then makes five parallel requests to backend services: user service, order service, recommendation service, cart service, and promotion service. It gathers all the responses and returns them to the mobile app in one combined response. This pattern uses asynchronous gathering to fetch user data, recent orders, recommendations, cart contents, and active promotions all at once.
+
+Backend for Frontend Pattern
+
+Different clients need different data shapes, so you create separate BFFs for each client type.
+
+You might have an iOS BFF that provides minimal data optimized for mobile, an Android BFF that also provides minimal data for mobile, and a Web BFF that provides full data for desktop users. All three BFFs communicate with the same backend microservices.
+
+For example, a Mobile BFF might fetch product details and only a reviews summary. It returns minimal information: product ID, name, price, a smaller mobile-optimized image URL, average rating, and review count. It doesn't include full review text to save bandwidth.
+
+Meanwhile, a Web BFF fetches product details, recent reviews, recommendations, and inventory information. It returns full product details, complete reviews, similar products, stock status, and estimated delivery time.
+
+When to use BFF: you have multiple client types like mobile, web, and IoT with different needs; you have client-specific logic like A/B tests or feature flags per platform; or you need to version the API per client.
+
+When NOT to use BFF: you only have a single client type, in which case just use an API gateway; or clients can handle multiple requests efficiently, in which case GraphQL might be better.
+
+Service Discovery
+
+The problem: the Payment service runs on five instances at dynamic IP addresses. The Order service needs to find them.
+
+Client-Side Discovery
+
+In client-side discovery, the Order Service takes multiple steps. First, it queries the service registry for "payment-service." Second, it gets a list of instances, for example at IP addresses 10.0.1.5 port 8080 and 10.0.1.6 port 8080. Third, it performs load balancing using round-robin. Fourth, it makes an HTTP request to the selected instance.
+
+The Service Registry, which could be Consul, etcd, or Eureka, maintains the list of instances for payment-service. It tracks instance-1 at 10.0.1.5 port 8080 as healthy, instance-2 at 10.0.1.6 port 8080 as healthy, and instance-3 at 10.0.1.7 port 8080 as unhealthy.
+
+In implementation, a ServiceDiscoveryClient connects to Consul and maintains a local cache with a time-to-live of 30 seconds. When getting service instances, it first checks the cache. If the cached data is fresh, it returns immediately. Otherwise, it queries Consul for healthy instances only and caches the result.
+
+When calling a service, it gets the list of instances, checks if any are available, performs simple round-robin selection by choosing randomly, constructs the URL, and makes the HTTP request.
+
+Server-Side Discovery
+
+In server-side discovery, the Order Service makes a request to a logical hostname like "http://payment-service/charge." A load balancer, such as AWS ALB, Nginx, or Envoy, intercepts this request. The load balancer queries the service registry and routes the request to a healthy instance, choosing from payment-service-1 at 10.0.1.5 or payment-service-2 at 10.0.1.6.
+
+Kubernetes Service Discovery
+
+In Kubernetes, you define a Deployment for payment service instances with three replicas. Each pod has a label "app: payment-service."
+
+You also define a Service resource with the same name "payment-service." This Service selects pods with the label "app: payment-service" and exposes them on port 80, which maps to the pod's target port 8080.
+
+The Order service simply calls "http://payment-service/charge." Kubernetes DNS automatically resolves this to one of the three pods.
+
+Distributed Tracing
+
+The problem: a request touches six services. Which one is slow?
+
+Imagine a user complains that checkout took five seconds and demands you fix it. Without tracing, you check Order Service logs and they look normal. You check Payment Service logs and they look normal. You check Inventory Service logs and they also look normal. You spend hours guessing where the problem is.
+
+With tracing, you look up trace ID abc123 and see the full request flow with timing. You immediately find that the Inventory Service made a database query that took 4.5 seconds. Problem fixed in ten minutes.
+
+Trace Structure
+
+A trace represents a complete request with a unique request ID, for example abc123. Within this trace, you have multiple spans representing different operations.
+
+The API Gateway span takes 100 milliseconds. Within that, the Order Service span takes 3000 milliseconds. The Order Service makes several sub-calls. The User Service getUser call takes 50 milliseconds. The Inventory Service checkStock call takes 2800 milliseconds. Within that checkStock call, a Database Query takes 2750 milliseconds – this is the slow part! Finally, the Payment Service charge call takes 100 milliseconds, which includes a Stripe API call taking 80 milliseconds.
+
+Implementation with OpenTelemetry
+
+You set up OpenTelemetry with a Jaeger exporter. In your Order Service, when creating an order, you start a span called "create_order" and set attributes like customer ID and item count.
+
+For each cross-service call, you create a child span. For example, a "get_customer" span when calling the User Service, a "check_inventory" span when calling the Inventory Service, and a "process_payment" span when calling the Payment Service.
+
+At the end, you set an attribute indicating the order status was "success" and return the order.
+
+To propagate trace context across services, you include the trace context in HTTP headers using the W3C Trace Context standard header called "traceparent."
+
+Key trace attributes to include are: business context like customer ID, order ID, and order total; technical context like HTTP method, HTTP status code, and database statements; and outcomes like error status and which payment gateway was used.
+
+Monolith vs Microservices vs Modular Monolith
+
+Let's do a comprehensive comparison across multiple criteria.
+
+For codebase: a monolith has a single repository, a modular monolith has a single repository with modular code, and microservices have multiple repositories.
+
+For deployment: a monolith deploys a single binary, a modular monolith deploys a single binary, and microservices deploy independent services.
+
+For database: a monolith has a shared database, a modular monolith has a shared database with logical separation, and microservices have separate databases per service.
+
+For scaling: a monolith scales the entire app, a modular monolith scales the entire app, and microservices scale services independently.
+
+For team size: a monolith works for 1 to 5 engineers, a modular monolith works for 5 to 20 engineers, and microservices work for 20 or more engineers across teams.
+
+For learning curve: a monolith is low, a modular monolith is medium, and microservices are high.
+
+For operational complexity: a monolith is low, a modular monolith is low, and microservices are high requiring monitoring, tracing, and service mesh.
+
+For consistency: a monolith has ACID transactions, a modular monolith has ACID transactions, and microservices have eventual consistency.
+
+For deployment risk: a monolith is high with all-or-nothing deploys, a modular monolith is high with all-or-nothing deploys, and microservices are low with isolated deployments.
+
+For cross-cutting changes: a monolith is easy using refactoring, a modular monolith is medium respecting module boundaries, and microservices are hard requiring coordination across services.
+
+For testing: a monolith is simple with integration tests, a modular monolith is simple with integration tests, and microservices are complex requiring contract tests and end-to-end tests.
+
+For latency: a monolith has no network calls, a modular monolith has no network calls, and microservices add latency through network hops.
+
+For failure isolation: a monolith has none where one crash takes down everything, a modular monolith has none where one crash takes down everything, and microservices have strong failure isolation using circuit breakers.
+
+For technology diversity: a monolith uses a single stack, a modular monolith uses a single stack, and microservices are polyglot allowing you to choose per service.
+
+Best use cases: monoliths are best for startups and simple domains, modular monoliths are best for growing teams with clear modules, and microservices are best for large organizations with complex domains.
+
+Key Concepts Checklist
+
+Make sure you can: define service boundaries using domain-driven design or team ownership; choose between choreography and orchestration for the saga pattern in distributed transactions; implement circuit breakers for inter-service calls with fallback strategies; decide between sidecar slash service mesh versus in-app libraries for cross-cutting concerns; design the BFF pattern if you have multiple client types with different data needs; set up service discovery choosing between client-side and server-side approaches; implement distributed tracing with trace context propagation; and understand when NOT to use microservices, such as with small teams or unclear boundaries.
+
+Practical Insights
+
+Start with a modular monolith. Split your code into modules with clear boundaries. Separate databases logically using different schemas or tables per module. Deploy as a monolith but enforce module boundaries in code reviews. Only extract to microservices when you have two or more teams or need independent scaling. Companies that succeed with this approach include Shopify and GitHub, both of which run monoliths with over one thousand engineers.
+
+Data ownership is non-negotiable. The bad approach is when the Order Service queries the User database directly. The good approach is when the Order Service calls the User Service API. Why does this matter? When the User Service team changes their schema, if the Order Service was accessing the database directly, it breaks. The solution is that the API contract becomes your stability boundary.
+
+Distributed transactions are expensive. A saga for order creation is three to ten times slower than a monolith transaction. Use sagas only when you actually NEED service independence. For read-heavy workloads, replicate data locally using event-driven patterns to avoid cross-service calls.
+
+For circuit breaker thresholds: set the failure threshold to 5 to 10 requests, set the recovery timeout to 10 to 30 seconds matching your service recovery time, and set the success threshold to 2 to 3 requests so you don't close the circuit too early. Monitor this: if circuit open time exceeds 1 minute, investigate the dependency.
+
+Service mesh adds latency. An Envoy sidecar adds 0.5 to 2 milliseconds per hop. For a five-hop request, this adds 2.5 to 10 milliseconds total. Is centralized observability worth the latency? It depends on your 99th percentile targets. Rule of thumb: if your 99th percentile is below 50 milliseconds, measure the sidecar impact carefully.
+
+For trace sampling in production: 100 percent sampling generates too much data, making it expensive and slowing your system. 1 percent sampling causes you to miss rare bugs. The strategy should be: always trace errors at 100 percent of failures, sample slow requests at the 95th percentile or above at 100 percent, sample normal requests at 1 to 10 percent, and use adaptive sampling by increasing the rate when detecting issues.
+
+Conway's Law is inevitable. If you split services but not teams, you get a distributed monolith, which is the worst of both worlds. If you split teams but not services, you get merge conflicts and slow deploys. Always align services with team ownership FIRST, then extract the code.

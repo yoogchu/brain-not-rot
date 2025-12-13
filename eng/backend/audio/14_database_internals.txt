@@ -1,0 +1,141 @@
+Chapter 14: Database Internals
+
+Why Understanding Internals Matters
+
+Imagine this scenario: you have a query that runs perfectly fine in your development environment, taking only 50 milliseconds. But when you deploy to production, that same query suddenly takes 30 seconds to execute. Without understanding database internals, you might throw your hands up and say "It's slow, let's add more servers." But with knowledge of how databases work under the hood, you'd approach this differently. You'd recognize that the query isn't using its index. You'd know that a B-tree lookup should be logarithmic in complexity, but instead the database is doing a full table scan with linear complexity. The index exists, but the statistics are stale. The solution? Run the ANALYZE command. Problem solved in 5 minutes instead of 5 days.
+
+Storage Engines: B-Trees versus LSM-Trees
+
+B-Trees: Used in PostgreSQL, MySQL InnoDB, and SQLite
+
+Let's start by understanding how B-trees are structured. Picture a tree structure with a root node at the top. This root node contains sorted keys, let's say 10, 20, 30, and 40. From this root, branches point downward to child nodes. Each branch represents a range: one for values less than 10, one for values between 10 and 20, one for values between 20 and 30, and one for values greater than 40. Each of these child nodes contains more specific ranges. For example, the "less than 10" node might contain 3, 7, and 9. The "10 to 20" node might have 12, 15, and 18, and so on. Finally, at the bottom of the tree, leaf nodes point to the actual data on disk.
+
+When you look up a value, let's say ID equals 25, here's what happens. First, the database reads the root node and determines that 25 is greater than 20 but less than 30, so it follows the middle-right branch. Second, it finds 25 in the array containing 22, 25, and 28. Third, it reads the actual row data from the leaf node. This entire operation takes logarithmic time, typically just 3 to 4 disk reads even for massive tables.
+
+Now let's talk about how B-trees handle writes. When you insert a new value, say ID equals 23, the database first finds the correct leaf node where this value belongs. If the leaf has space available, it simply inserts the value in sorted order. However, if the leaf is full, things get more complex. The leaf must split into two separate nodes, and the parent node needs to update its pointers. This splitting can cascade all the way up the tree. Finally, the changes are written to disk using random input-output operations.
+
+B-trees have some important characteristics. They're optimized for reads because each key lives in exactly one location. However, they require random input-output for writes, which can be slower. They perform in-place updates, meaning they modify existing data rather than creating new versions. This makes them ideal for read-heavy online transaction processing workloads.
+
+LSM-Trees: Used in Cassandra, LevelDB, RocksDB, and ScyllaDB
+
+LSM stands for Log-Structured Merge Tree, and these work quite differently from B-trees. Let's walk through how data flows through an LSM-tree. When a new write comes in, it first goes to an in-memory structure called a memtable, which keeps data sorted. When the memtable fills up, it's flushed to disk as an SSTable, which stands for Sorted String Table. These SSTables are immutable, meaning they never change once written. The first level, called L0, contains these freshly written SSTables. Periodically, the database runs a compaction process that merges SSTables from L0 into larger, sorted SSTables at L1. This compaction continues, with L1 being merged into even larger SSTables at L2, and so on.
+
+The write process is remarkably fast. When you insert ID equals 23, the database first writes this to a write-ahead log for durability. Then it inserts the data into the memtable in memory. At this point, it returns success to the client. This is extremely fast because everything so far has been sequential writes. In the background, when the memtable fills up, it's flushed to an SSTable on disk, and periodically the system compacts SSTables to merge and deduplicate data.
+
+Reading from an LSM-tree is more complex. When you read ID equals 23, the database first checks the memtable since it has the newest data. Then it checks bloom filters for each SSTable. A bloom filter is a probabilistic data structure that can definitively say "this key is not here" or "this key might be here." Based on these filters, the database checks SSTables from newest to oldest. The first match wins because it represents the most recent version. In the worst case, you might have to check all levels, which is why LSM-trees have read amplification.
+
+LSM-trees have their own set of characteristics. They're optimized for writes because everything is sequential input-output. However, they suffer from read amplification because you might need to check multiple files. They also have space amplification during compaction periods when old and new data coexist temporarily. This makes them ideal for write-heavy workloads, like logging systems or time-series data.
+
+Comparing B-Trees and LSM-Trees
+
+When it comes to write performance, B-trees are slower because they require random input-output, while LSM-trees are faster with their sequential writes. For read performance, the situation flips: B-trees are faster because each key lives in one location, while LSM-trees are slower because they might need to check multiple files. B-trees are more space-efficient, while LSM-trees use more space during compaction. B-trees have lower write amplification, while LSM-trees have higher write amplification because data gets rewritten during compaction. The use case determines which to choose: B-trees excel at read-heavy online transaction processing, while LSM-trees shine for write-heavy workloads, logs, and time-series data.
+
+Indexes
+
+Why Indexes Matter
+
+Let me illustrate the difference indexes make with a concrete example. Without an index, when you run "SELECT star FROM users WHERE email equals alice@example.com", the database performs a full table scan. That's O of n complexity, meaning it checks every single row. With an index on the email column, the database uses a B-tree lookup with O of log n complexity, requiring just 3 to 4 disk reads. For a table with 1 million rows, a full scan means roughly 1 million row reads, while an index lookup requires only about 20 row reads, since log base 2 of 1 million is approximately 20.
+
+Index Types
+
+The B-tree index is the default in most databases. You create one with "CREATE INDEX idx underscore email ON users parenthesis email". B-tree indexes are good for equality conditions like "WHERE email equals x", range queries like "WHERE created underscore at greater than 2024-01-01", prefix searches like "WHERE name LIKE Al percent", and sorting with "ORDER BY created underscore at". However, they're bad for suffix or contains searches like "WHERE name LIKE percent ice" and for low cardinality columns like "WHERE is underscore active equals true" when 50 percent of rows match.
+
+Hash indexes work differently. You create them with "CREATE INDEX idx underscore email ON users USING HASH parenthesis email". They're good for exact equality like "WHERE email equals x", but they're bad for range queries and sorting. They're faster than B-tree for exact lookups, but much more limited in what they can do.
+
+GIN stands for Generalized Inverted Index. You create one with "CREATE INDEX idx underscore tags ON posts USING GIN parenthesis tags". These are good for array contains operations like "WHERE tags at greater-than ARRAY bracket python bracket", full-text search like "WHERE to underscore tsvector parenthesis body at at search", and JSONB containment checks. They're used for arrays, JSONB data, and full-text search.
+
+GiST stands for Generalized Search Tree. You create one with "CREATE INDEX idx underscore location ON stores USING GIST parenthesis location". These excel at geometric queries like "WHERE location less-than dash greater-than point parenthesis x comma y less-than 10", range types like "WHERE period ampersand ampersand bracket 2024-01-01 comma 2024-12-31 bracket", and PostGIS spatial queries.
+
+Composite Indexes
+
+With composite indexes, order matters tremendously. If you create an index with "CREATE INDEX idx underscore user underscore date ON orders parenthesis user underscore id comma created underscore at", the index can be used when you filter by user ID alone, when you filter by both user ID and created date, and when you filter by user ID and order by created date. However, the index cannot be used when you only filter by created date without specifying user ID, or when you only order by created date without filtering by user ID, because the first column is missing.
+
+This is known as the leftmost prefix rule. An index on columns A, B, C supports queries that use A alone, A and B together, A and B and C together, A with ordering by B, and A and B with ordering by C. However, it does not support queries that use only B, only C, or ordering by B without filtering by A, because the leftmost column A is missing.
+
+Covering Indexes
+
+Covering indexes are a powerful optimization. Imagine you run "SELECT user underscore id comma email FROM users WHERE email equals x". With a regular index on email, the database performs an index lookup to find the row, then performs a table lookup to retrieve the user ID. That's two lookups. With a covering index created as "CREATE INDEX idx underscore email underscore userid ON users parenthesis email comma user underscore id", the database can perform an index-only scan. All the data it needs is in the index itself, so there's no need for a table lookup. PostgreSQL even has an INCLUDE clause for this: "CREATE INDEX idx underscore email ON users parenthesis email INCLUDE parenthesis user underscore id comma name".
+
+Query Execution
+
+EXPLAIN ANALYZE
+
+The EXPLAIN ANALYZE command is your best friend for understanding query performance. When you run "EXPLAIN ANALYZE SELECT star FROM orders WHERE user underscore id equals 123 AND status equals pending", you get a query plan that shows exactly what the database is doing. The output shows things like "Index Scan using idx underscore orders underscore user underscore id on orders", with the index condition being "user underscore id equals 123" and a filter for "status equals pending". It also shows how many rows were removed by the filter, the planning time, and the execution time.
+
+Key things to look for in the output: "Seq Scan" means a full table scan, which is usually bad for large tables. "Index Scan" means the database is using an index, which is good. "Index Only Scan" means all data comes from the index without table lookups, which is best. "Rows Removed by Filter" indicates the index isn't selective enough. "Nested Loop" can be slow for large joins.
+
+Join Algorithms
+
+There are three main join algorithms. The nested loop approach is the simplest: for each row in Table A, iterate through each row in Table B, and if the join condition matches, output the row. This has O of n times m complexity. It's good for small tables or when you have indexed lookups.
+
+Hash join works by building a hash table from the smaller table, then for each row in the larger table, looking up matches in the hash table. If there's a match, output the row. This has O of n plus m complexity. It's good for equality joins when there's no index, but it requires enough memory for the hash table.
+
+Merge join sorts both tables by the join key, then walks through both simultaneously, outputting matching rows. This has O of n log n plus m log m complexity due to the sorting. It's good when the data is already sorted.
+
+Write-Ahead Logging
+
+The Durability Problem
+
+Without write-ahead logging, here's what would happen. The database modifies data in memory, acknowledges success to the client, and later flushes the data to disk. If the system crashes between the acknowledgment and the disk flush, all that data is lost forever.
+
+The WAL Solution
+
+Write-ahead logging solves this problem elegantly. The database first writes the change to a write-ahead log using fast, sequential writes. Then it acknowledges success to the client. Only after this does it modify the data in memory, and much later, in the background, it flushes the changes to disk. If the system crashes at any point, it can replay the write-ahead log during recovery to reconstruct all committed transactions. No data is lost.
+
+The write-ahead log is structured as a series of segment files. Each segment contains records like "INSERT INTO users ID equals 1 comma name equals Alice", "UPDATE users SET name equals Bob WHERE ID equals 1", "DELETE FROM users WHERE ID equals 1", and "COMMIT". On crash recovery, the database reads the WAL from the last checkpoint, replays all committed transactions, and discards any uncommitted transactions.
+
+MVCC: Multi-Version Concurrency Control
+
+The Concurrency Problem
+
+Without MVCC, you'd have problems like this. Transaction A reads an account balance and sees 100. Transaction B updates the balance to 50. Transaction A reads the account again and now sees 50. Transaction A has seen inconsistent data, which is called a non-repeatable read.
+
+The MVCC Solution
+
+MVCC solves this by keeping multiple versions of each row. Every row has hidden columns called xmin and xmax. Xmin is the transaction ID that created this version, and xmax is the transaction ID that deleted or updated this version. When you update a row, you don't modify it in place. Instead, you create a new version.
+
+For example, you might have two versions of a row. The old version has ID equals 1, balance equals 100, xmin equals 100, and xmax equals 200. The current version has ID equals 1, balance equals 50, xmin equals 200, and xmax equals null. When Transaction A started at transaction ID 150, it sees the version where xmin is less than or equal to 150 and 150 is less than xmax. So it sees balance equals 100 consistently, even though Transaction B with transaction ID 200 created a new version by setting xmin to 200 on the new version and xmax to 200 on the old version.
+
+The benefits are huge: readers don't block writers, writers don't block readers, and you get consistent snapshots without locks. The costs are that dead tuples, meaning old versions, need cleanup through a process called VACUUM, and you use more storage for multiple versions.
+
+Vacuum and Maintenance
+
+Why Vacuum?
+
+After UPDATE or DELETE operations with MVCC, old row versions still exist as dead tuples. This space isn't automatically reclaimed, and indexes can become bloated. Without running VACUUM, the table grows forever, queries slow down progressively, and eventually the disk fills up.
+
+Autovacuum
+
+The autovacuum process handles this automatically. You can check autovacuum statistics with "SELECT relname comma n underscore dead underscore tup comma n underscore live underscore tup comma last underscore autovacuum FROM pg underscore stat underscore user underscore tables WHERE n underscore dead underscore tup greater than 1000". You can tune autovacuum for specific tables with "ALTER TABLE orders SET parenthesis autovacuum underscore vacuum underscore threshold equals 50 comma autovacuum underscore vacuum underscore scale underscore factor equals 0.1". This means vacuum runs when dead tuples exceed 50 plus 0.1 times the number of live tuples.
+
+Statistics and ANALYZE
+
+The query planner uses statistics to estimate costs and choose the best query plan. When statistics are stale, you get bad query plans and slow queries. You can manually analyze a table with "ANALYZE users" and check statistics with "SELECT star FROM pg underscore stats WHERE tablename equals users".
+
+Connection Pooling
+
+The Problem
+
+Creating a new PostgreSQL connection is expensive. The TCP handshake takes about 1 millisecond, the SSL handshake takes about 5 milliseconds, authentication takes about 2 milliseconds, and forking a backend process takes about 10 milliseconds. That's a total of about 20 milliseconds per connection. If you have 100 requests per second, each creating a new connection, that's 100 times 20 milliseconds, which equals 2 seconds of overhead every single second. The server gets overwhelmed quickly.
+
+The Connection Pool Solution
+
+A connection pool like PgBouncer solves this by maintaining a pool of pre-established connections that get reused. Imagine hundreds of clients all sharing just a few database connections. Instead of each client establishing its own connection, they all share connections from the pool.
+
+There are three pool modes. Session mode means the client keeps a connection for their entire session. Transaction mode means the client gets a connection for each transaction. Statement mode means the client gets a connection for each individual statement. A typical PgBouncer configuration might set pool mode to transaction, max client connections to 1000, and default pool size to only 20 actual database connections.
+
+Key Concepts Checklist
+
+Make sure you can explain the trade-offs between B-tree and LSM-tree storage engines. Know when to create indexes and, just as importantly, when not to. Be able to read and interpret EXPLAIN ANALYZE output to diagnose slow queries. Explain MVCC and understand both its benefits and costs. Describe how write-ahead logging works and enables crash recovery. Understand why connection pooling is absolutely necessary in production environments.
+
+Practical Insights
+
+When it comes to index strategy, don't over-index. Each index slows down writes and costs storage. Monitor unused indexes using the pg underscore stat underscore user underscore indexes view. Consider partial indexes for hot data, like creating an index WHERE is underscore active equals true. Think about covering indexes for your most critical queries.
+
+For query optimization, always start with EXPLAIN ANALYZE. Look for sequential scans on large tables. Check for missing indexes. Watch for implicit type casts that prevent the database from using an index.
+
+For maintenance, monitor the dead tuple ratio closely. Tune autovacuum more aggressively for write-heavy tables. Run ANALYZE after bulk loads to update statistics. Use pg underscore repack to handle table and index bloat when autovacuum isn't enough.
+
+For connection management, always use connection pooling in production. Size your pool to match actual concurrency needs, not the theoretical maximum. Use transaction pooling for stateless applications. Monitor connection wait times to ensure your pool is sized correctly.
+
+This concludes Chapter 14 on Database Internals.

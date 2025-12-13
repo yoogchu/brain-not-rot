@@ -1,0 +1,153 @@
+Chapter 19: Event-Driven Architecture
+
+Why Event-Driven Architecture?
+
+Let's start with a real-world problem you might face in an e-commerce platform. When an order is placed, the system needs to do several things: save the order to the database, charge the customer's credit card, send a confirmation email, update inventory, trigger shipment, and update analytics.
+
+In a traditional synchronous approach, all these operations happen one after another in sequence. The entire request could take 8 seconds to complete. If the payment gateway times out, the entire order fails. If the email service is down, the order can't be placed at all. Every service is tightly coupled to every other service, creating a fragile system.
+
+Now imagine this with event-driven architecture. When an order is placed, the system publishes an "OrderCreated" event and immediately returns a success response in just 200 milliseconds. Then, various event consumers process the event asynchronously. The payment service charges the card, the email service sends confirmation, the inventory service updates stock, the shipping service creates a label, and the analytics service records metrics. Each service processes independently. Failures don't cascade through the system. The system stays responsive to users.
+
+Event Sourcing
+
+Let's talk about the problem that event sourcing solves. Traditional create, read, update, delete systems, known as CRUD, store only the current state of your data. You lose all history. Why is this account balance one thousand dollars? What sequence of transactions led here? How do we rebuild the state if the database becomes corrupted? These questions are difficult or impossible to answer.
+
+Event sourcing works differently. Instead of storing current state, you store the complete sequence of events that led to it.
+
+In traditional CRUD, your accounts table might just have an id and a balance. Account id 42 shows a balance of one thousand dollars, but that's all you know. Just the current state, no history.
+
+With event sourcing, you have an events table that's append-only, meaning you only add new rows, never modify existing ones. This table shows the complete history: event 1 is AccountCreated with id 42 at 10:00 AM. Event 2 is MoneyDeposited for 500 dollars at 10:05. Event 3 is MoneyWithdrawn for 200 dollars at 10:10. Event 4 is MoneyDeposited for 700 dollars at 10:15. To compute the current balance, you replay these events: start at zero, add 500, subtract 200, add 700, and you get one thousand dollars.
+
+Let me explain how this is implemented in code. First, you define an Event data structure with fields for the aggregate id (which identifies which entity this event belongs to), the event type (like "MoneyDeposited"), the actual data, and a version number for optimistic locking.
+
+Then you create a BankAccount class. The account has an id, a balance, a version number, and a list of pending events. When you want to deposit money, you create a MoneyDeposited event, apply it to update the internal state, and add it to the pending events list. The apply event method is the key piece: it looks at the event type and updates the balance accordingly. If it's a MoneyDeposited event, add to the balance. If it's MoneyWithdrawn, subtract from the balance. Then increment the version.
+
+The really powerful part is the "from events" class method. This method rebuilds the complete state of an account by replaying all historical events. You create a fresh account object and apply each event in sequence. This is how you recover state from your event store.
+
+Let's look at the trade-offs. Event sourcing provides incredible auditability because you have a complete history and perfect audit trail, but it requires more storage. Debugging becomes easier because you can replay events to reproduce bugs exactly, but you need to handle schema evolution carefully. State recovery is powerful since you can rebuild from events after corruption, but replay can be slow for very long event histories. You can answer temporal queries like "what was the balance at 10 AM yesterday?" but query complexity increases.
+
+When should you use event sourcing? It's excellent for financial systems, when you have auditing requirements, and in complex domains where history really matters. When should you NOT use it? Avoid it for simple CRUD applications, for performance-critical reads unless you combine it with CQRS, when you have frequently changing business rules, or when you have a small team that might struggle with the learning curve.
+
+CQRS: Command Query Responsibility Segregation
+
+Event sourcing gives you great writes but can make reads slow because you have to replay all events. Also, read and write requirements often differ fundamentally. Writes need strong consistency and validation, while reads need speed and denormalization.
+
+CQRS solves this by completely separating read and write models. Picture this architecture: the client sits at the top. When it wants to make changes, it sends commands, which are mutations, to the write model. When it wants to query data, it sends queries to the read model. These are completely separate systems.
+
+The write model uses an event store. Events are appended to the store, optimized for consistency and validation. When events are written, they flow over to the read model, which contains projections. These are denormalized views like an account view table that just stores the current balance. The read model is optimized for fast reads and denormalized data structures.
+
+Here's how you implement this. On the write side, you have an AccountCommandService. When someone wants to deposit money, you load the current state from events in the event store, create a BankAccount object by replaying those events, execute the deposit command on the account, then persist and publish all pending events.
+
+On the read side, you have an AccountQueryService. This service maintains denormalized read models, like a simple dictionary mapping account IDs to account views. When someone queries the account balance, you just do a fast lookup in this denormalized view. No event replay needed. You can also support complex queries, like finding all accounts with a balance over a certain amount, by scanning the read model.
+
+The magic that connects them is the projection. The AccountProjection listens to events. When an event occurs, it updates the read model. If it's a MoneyDeposited event, add to the balance in the view. If it's MoneyWithdrawn, subtract. The read model is always catching up to the write model by processing events.
+
+The trade-offs are clear. Read performance is fast because data is denormalized, but you have eventual consistency between the write and read models. You can scale reads and writes independently, which is powerful, but it adds significant complexity. You get flexibility to create multiple read models from the same events, but you're duplicating data across these models.
+
+Use CQRS when you have a high read-to-write ratio, when you need complex queries, or when you need to scale reads independently. Don't use it for simple CRUD applications, when you need strong consistency across all operations, or if you have a small team that might be overwhelmed by the added complexity.
+
+Outbox Pattern
+
+Here's a critical problem in distributed systems. You need to atomically update your database AND publish an event. If the database commit succeeds but the event publish fails because Kafka is down, your data becomes inconsistent. The order is saved in the database, but no one knows about it because the event was never published.
+
+The outbox pattern solves this. Instead of publishing events directly, you store them in a database table called the outbox, then publish them in a separate process.
+
+Here's how it works. Your application receives a request and starts a single database transaction. Within that transaction, it writes to both the main business table, like orders, and to a special outbox events table. The order gets id 123 with status "new". The outbox event gets event id 1 with type "OrderCreated" and a published flag set to false. This all happens in one transaction, so either both succeed or both fail.
+
+Then a separate process, called the message relay, polls the outbox table. It reads unpublished events, publishes them to Kafka, and marks them as published. This is a separate transaction, but now you're guaranteed that every database change has a corresponding event in the outbox.
+
+Let me walk through the implementation. You define your database models. The Order table has id, customer id, and total. The OutboxEvent table has id, event type, aggregate id, the JSON payload, and a published boolean that defaults to false.
+
+When you create an order, you do it in a single database session. You create the order object and add it to the session. You call flush to get the order id assigned. Then, critically, you create an outbox event in the SAME transaction with the event type "OrderCreated" and the order details as JSON payload. You add it to the session. When you commit, both the order and the outbox event are committed atomically. Either both succeed or both fail.
+
+The message relay is a separate async loop. It polls for unpublished events, limiting to 100 at a time for efficiency. For each event, it publishes to Kafka using the event type as the topic. After successful publish, it marks the event as published and commits. Then it sleeps for a second before the next poll.
+
+The trade-offs are straightforward. You get guaranteed event publishing because the event is in the database, but there's a small delay creating eventual consistency. You get atomicity between database updates and events with a single transaction, but you need an extra table and polling overhead. Events are published in order, which is often important, but you need to handle potential duplicates on the consumer side.
+
+Use the outbox pattern when you must guarantee events are published and can tolerate a small delay. Don't use it when you need immediate consistency or have extremely high event volume where the polling overhead becomes problematic.
+
+Event Schema Evolution
+
+Events are append-only. You cannot change historical events that are already in your event store. But business requirements change over time. How do you handle this?
+
+You need schema evolution strategies. Let's say version 1 of your OrderCreated event has just order id and total amount. Version 2 adds an optional currency field. Old events don't have currency, but new events do.
+
+You can handle this with upcasting. The EventUpcaster transforms old events to the new format on the fly. When it sees a version 1 event, it adds a default currency of "USD" and updates the version to 2. Now all your event handlers can assume version 2 format.
+
+Another approach is using Avro for schema evolution. Avro has built-in support for schema evolution. Schema version 2 adds an optional currency field with a default value of "USD". When you read old version 1 events using the version 2 schema, Avro automatically fills in the default value.
+
+Many systems use a schema registry pattern. The producer registers its schema with a central schema registry. The registry returns a schema id. When the producer writes to Kafka, it includes both the schema id and the payload. The consumer reads from Kafka, fetches the schema from the registry using that id, and deserializes the payload correctly. This ensures producers and consumers always agree on schema format.
+
+Let's compare approaches. Avro is compact and has schema evolution built in, but it's a binary format that's not human-readable. Protobuf is efficient and generates code, but it's more complex than JSON. JSON with versioning is simple and human-readable, but you don't get schema enforcement and it's verbose. Upcasting can handle any change, but you must maintain upcasters forever, even for very old event versions.
+
+Idempotency and Exactly-Once Processing
+
+Networks are unreliable. Events may be delivered multiple times. If you process them twice, you get bugs. Imagine an event that says "MoneyDeposited 100 dollars". If you process it once, the balance correctly goes from one thousand to one thousand one hundred. If you accidentally process it twice, the balance becomes one thousand two hundred, which is wrong.
+
+The solution is idempotency keys. Every event gets a unique identifier. Before processing an event, you check if you've already processed it. If yes, you skip it. If no, you process it and record that you've processed it.
+
+Here's the implementation. You create an IdempotentEventProcessor. When processing an event, you first generate an event id by combining the aggregate id and version number. You query your ProcessedEvent table to see if this event id exists. If it does, you return immediately without doing anything. If not, you handle the event normally, insert a record into ProcessedEvent to mark it as done, and commit the transaction.
+
+You can also use Redis for idempotency. Before processing a payment, you check Redis for the idempotency key. If it exists, you return the cached result without reprocessing. If not, you process the payment, cache the result in Redis with a time-to-live of 24 hours, and return the result.
+
+Kafka has built-in support for exactly-once processing. On the producer side, you enable idempotence and use transactional writes. You start a transaction, send your messages, and commit the transaction. Kafka ensures each message is written exactly once. On the consumer side, you set the isolation level to "read committed" so you only see messages from committed transactions.
+
+Saga Pattern
+
+Distributed transactions across multiple services are challenging. If one service fails, you need to rollback the others. Two-phase commit is one solution but it's slow and locks resources across services. The saga pattern provides an alternative.
+
+A saga is a chain of local transactions with compensating actions. Let's walk through an order saga. In the success case, the order service creates the order, the payment service charges the card, and the inventory service reserves items. All three steps succeed.
+
+But what if payment fails? The payment service tries to charge the card but it fails. Now you need to compensate by canceling the order in the order service. Each step has both a forward action and a compensating action.
+
+There are two styles of sagas: choreography and orchestration. In orchestration, you have a central coordinator that controls the flow. The saga orchestrator sends CreateOrder to the order service, ChargeCard to the payment service, ReserveItems to the inventory service. If any step fails, the orchestrator runs compensations: RefundCard and CancelOrder.
+
+Here's how you implement an orchestrated saga. Define a SagaStep class with a name, an action function, and a compensation function. The SagaOrchestrator takes a list of steps. When you execute the saga, it runs each step's action in order, tracking which steps completed successfully. If any step throws an exception, it runs compensations in reverse order. Each completed step has its compensation called, undoing the work.
+
+For example, your saga has three steps. Step one creates the order with a compensation to cancel it. Step two charges the card with a compensation to refund it. Step three reserves inventory with a compensation to release the reservation. If charging the card fails, the orchestrator automatically calls the cancel order compensation.
+
+Let's compare choreography versus orchestration. Choreography has low coupling because services are independent, but complexity is distributed making it hard to debug. Orchestration has higher coupling due to the central coordinator, but complexity is centralized making it easier to reason about. Choreography has poor observability because events are scattered across services, while orchestration has easy observability since the orchestrator knows the entire flow.
+
+Use the saga pattern for multi-service transactions when you can tolerate eventual consistency. Don't use it when you need ACID guarantees or when compensations are impossible. Some actions can't be undone, like sending an email to a customer. You can't unring that bell.
+
+Event Sourcing versus Traditional CRUD
+
+Let's compare event sourcing and traditional CRUD across several dimensions.
+
+For history, event sourcing gives you a complete audit trail of everything that happened, while traditional CRUD only stores the current state.
+
+For debugging, event sourcing lets you replay events to reproduce bugs exactly, while CRUD relies on logs and educated guessing.
+
+For storage, event sourcing uses more space because you store all events, while CRUD uses less by storing only current state.
+
+For reads, event sourcing is slow unless you use CQRS because you have to replay events, while CRUD is fast with direct lookups.
+
+For writes, event sourcing is fast because it's append-only, while CRUD is moderate speed because it updates in place.
+
+For complexity, event sourcing is high due to event handlers and projections, while CRUD is low with simple queries.
+
+For schema changes, event sourcing is hard because events are immutable, while CRUD is easy with alter table statements.
+
+Event sourcing is best for financial systems and audit-heavy domains, while traditional CRUD is best for general CRUD applications.
+
+Key Concepts Checklist
+
+Here's what you should be able to explain for interviews. First, explain event sourcing and how it stores state as an event log instead of current state. Second, demonstrate how to rebuild aggregate state by replaying events. Third, describe CQRS and how it separates read and write models. Fourth, implement the outbox pattern for reliable event publishing. Fifth, handle event schema evolution using approaches like Avro, versioning, or upcasting. Sixth, design idempotent event handlers that can safely process duplicate events. Seventh, implement the saga pattern for distributed transactions. Finally, know when NOT to use event sourcing, such as for simple CRUD applications or performance-critical reads.
+
+Practical Insights
+
+Let me share some hard-won wisdom from running event-sourced systems in production.
+
+For event store optimization, you need to snapshot aggregates every N events to avoid replaying thousands of events every time. For example, snapshot a bank account every 100 transactions. When replaying, start from the latest snapshot and add events since then. As a rule of thumb, snapshot when you have more than 1000 events since the last snapshot.
+
+Debugging event-sourced systems is actually quite powerful. Say an account balance is wrong. Here's how you debug: get all events for that account, replay events locally in your development environment, find which specific event caused incorrect state, and check the event handler logic for that event type. This level of debugging is impossible with traditional CRUD because there's no history.
+
+Monitor projection lag carefully. On the write side, record an event timestamp when creating events. On the read side, track projection lag by comparing the current time to the timestamp of the last processed event. Alert if lag exceeds 5 seconds, because that means your read model is becoming stale.
+
+For event versioning in practice, store the version in the event itself. Make consumers handle multiple versions or upcast to the latest version. Never delete old event handlers, even after years, because old events still exist in the store. Plan for version migration by tracking what percentage of events are each version. For example, you might say "90 percent of events are now version 2, so we'll drop the version 1 handler next quarter."
+
+Let me emphasize when NOT to use event sourcing. Don't use it for simple CRUD scenarios like a user profile with name, email, and avatar. Just use update statements. Don't use it when you have frequently changing business rules, because event replay becomes a nightmare. Don't use it for performance-critical reads unless you're willing to implement CQRS. Don't use it with a small team due to the learning curve and maintenance overhead. And be very careful with privacy requirements. If users have a right to be deleted, that's hard with event sourcing because events are immutable.
+
+Finally, handle saga timeouts carefully. When executing a saga step, don't wait forever for a downstream service. Use a timeout, perhaps 30 seconds. If the timeout expires, raise a timeout error and trigger compensation to fail the saga gracefully. This prevents sagas from hanging indefinitely when services are slow or down.
+
+That concludes our chapter on event-driven architecture. These patterns are powerful tools for building scalable, resilient distributed systems, but they come with real complexity. Use them when the benefits justify the costs, and always start simple before adding these patterns.

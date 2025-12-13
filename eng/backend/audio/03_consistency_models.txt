@@ -1,0 +1,173 @@
+Chapter 3: Consistency Models
+
+The Bank Account Problem
+
+Let's start with a real-world scenario that illustrates why consistency models matter in distributed systems. Imagine you have a bank account with a balance of one thousand dollars. At time zero, an ATM in New York City reads your balance as one thousand dollars. At the same time, an ATM in London also reads your balance as one thousand dollars. At time one, the New York ATM processes a withdrawal of eight hundred dollars. At time two, the London ATM processes a withdrawal of five hundred dollars. At time three, what should the final balance be?
+
+Without proper consistency guarantees, you could end up with a negative three hundred dollar overdraft. This isn't a hypothetical scenario. It's the exact problem that drives distributed systems design.
+
+Consistency models define what guarantees a system provides about the order and visibility of operations. Understanding these models is crucial for building reliable distributed systems.
+
+The Consistency Spectrum
+
+Consistency models exist on a spectrum from strongest to weakest. At the strong end, we have linearizability, which provides the strongest guarantees. Moving toward the weak end, we have sequential consistency, then causal consistency, and finally eventual consistency at the weakest end.
+
+Linearizability makes the system appear as a single copy of data in real time. Sequential consistency provides a global order of operations, but not necessarily in real time. Causal consistency respects cause and effect relationships between operations. And eventual consistency offers maximum availability but the weakest guarantees.
+
+Each level trades some consistency for better performance and availability. The key is choosing the right model for your use case.
+
+Linearizability: The Strongest Model
+
+Let's start with the strongest consistency model: linearizability. The formal definition states that a system behaves as if there's a single copy of data, with operations taking effect atomically at some point between their invocation and response.
+
+Here's what that means. Imagine a timeline from time zero to time four. A write operation to set X equals one starts at time zero and completes at time one. Somewhere within that interval, the write takes effect atomically. Then, a read operation for X starts at time two and completes at time three. Because the write completed before the read started, the read must return the value one.
+
+The key guarantee of linearizability is real-time ordering. If operation A completes before operation B starts, then A's effect must be visible to B. For example, if Process 1 writes X equals one and that write completes at time one, and then Process 2 reads X starting at time two, since time one is less than time two, the read must see X equals one.
+
+What does linearizability look like in practice? Imagine Client 1 writes a balance of one thousand to the database and receives a success response at time one. Then Client 2 reads the balance, starting after time one. Client 2 must return one thousand. If Client 2 saw zero or some old value, that would not be linearizable.
+
+To achieve linearizability, you need coordination between nodes. There are three main approaches.
+
+Option one is a single leader with synchronous replication. All reads and writes go through one node. That node acts as the single copy, and synchronous replication ensures durability.
+
+Option two is using a consensus protocol like Raft or Paxos. Replicas agree on the operation order, and a majority must acknowledge before success. Systems like etcd, ZooKeeper, and Consul use this approach.
+
+Option three is simply using a single node with no replication. This is trivially linearizable, but offers no fault tolerance and can't scale.
+
+The cost of linearizability is significant. In terms of latency, every operation requires coordination. Cross-datacenter operations incur at least one hundred to two hundred milliseconds per operation due to network round-trips for consensus.
+
+For availability, during network partitions, you must choose consistency over availability. The minority partition cannot make progress. This is the CAP theorem in action.
+
+For throughput, the single point of serialization limits how many operations you can process. You cannot horizontally scale writes.
+
+Despite these costs, linearizability is essential for certain use cases. Leader election requires exactly one leader at a time. Distributed locks need exclusive access to resources. Unique ID generation cannot tolerate duplicates. Financial transactions must ensure account balances never go negative. And inventory systems cannot oversell items.
+
+Sequential Consistency
+
+Next, let's discuss sequential consistency. The definition is that all operations appear in some sequential order that is consistent with each process's program order. The key difference from linearizability is that there is no real-time guarantee.
+
+Here's an example to illustrate the difference. Process A writes X equals one, then writes Y equals two. Process B reads Y, then reads X. What are the valid sequential orderings?
+
+One valid ordering is: write X equals one, write Y equals two, read Y returns two, read X returns one. In this case, A's writes happen first, then B reads. That's valid.
+
+Another valid ordering is: write X equals one, read Y returns zero, write Y equals two, read X returns one. Here, B starts reading before A finishes writing Y. That's also valid under sequential consistency.
+
+However, this ordering would be invalid: read Y returns two, read X returns zero. This is invalid because if B sees Y equals two, then A's writes must have happened. But then X should be one, not zero, since A wrote X before Y.
+
+The subtle difference from linearizability becomes clear when we consider real-time ordering. Imagine in real time: at time zero to time one, Client A writes X equals one. At time one to time two, Client B writes X equals two. At time three, Client C reads X.
+
+Under linearizability, C must read two because B completed before C started. Under sequential consistency, C could read either one or two, as long as all clients see the same order. Sequential consistency allows reordering as long as each process's operations stay in order.
+
+Implementation typically uses total order broadcast. A single sequencer assigns sequence numbers, and all replicas apply operations in sequence order.
+
+Sequential consistency is less common in databases. It appears in some older CPU memory models and in systems where real-time ordering doesn't matter.
+
+Causal Consistency
+
+Now let's explore causal consistency. The definition is that causally related operations are seen in the same order by all processes. Concurrent, or unrelated, operations can be seen in different orders.
+
+What makes operations causally related? There are three rules. First, if operations A and B happen in the same process in that order, then A happens-before B. Second, if A sends a message that is received by B, then A happens-before B. Third, transitivity: if A happens-before B and B happens-before C, then A happens-before C.
+
+Here's a concrete example. Process A writes X equals one. Process B reads X equals one, then writes Y equals two. Notice that Y equals two causally depends on X equals one. Process C reads Y equals two, then tries to read X. What value must C see for X?
+
+Causal consistency guarantees that C must read X equals one. You cannot see an effect, like Y equals two, without seeing its cause, X equals one.
+
+However, if two writes are independent, different processes can see them in different orders. For example, Process D writes Z equals one hundred and Process E writes W equals two hundred. These are concurrent, with no causal relationship. Process F might see Z equals one hundred first, then W equals two hundred. Process G might see W equals two hundred first, then Z equals one hundred. Since there's no causal relationship, the order can differ.
+
+The implementation of causal consistency typically uses vector clocks. Each process maintains a vector of logical clocks, with one entry per process.
+
+Here's how it works. Process A has a vector of A colon one, B colon zero, C colon zero, and writes X equals one. A increments its own clock. Process B receives X equals one with the vector A colon one, B colon zero, C colon zero. B updates its vector to A colon one, B colon one, C colon zero, then writes Y equals two. B takes the maximum of the received vector and increments its own entry.
+
+Process C receives Y equals two with vector A colon one, B colon one, C colon zero. From this vector, C knows that X equals one must exist because the A entry is one. C must wait for X equals one before applying Y equals two.
+
+To compare vectors, you check if one dominates the other. For example, vector one is A colon two, B colon one, C colon three, and vector two is A colon one, B colon two, C colon two. Is vector one less than vector two? No, because A colon two is greater than A colon one. Is vector two less than vector one? No, because B colon two is greater than B colon one. Since neither dominates, they are concurrent and can be applied in either order.
+
+If vector three is A colon three, B colon two, C colon four, is it greater than vector one? Yes, all components are greater than or equal to vector one, and at least one is strictly greater. So vector three happens after vector one.
+
+Version vectors are used for replicated data. Each replica maintains a version vector. On a write, the replica increments its own component. For example, Replica 1 has a vector of R1 colon five, R2 colon three, R3 colon four, meaning it has seen five of its own writes, three from Replica 2, and four from Replica 3. Replica 2 has a vector of R1 colon four, R2 colon six, R3 colon four, indicating it's behind on Replica 1's updates. When Replica 2 receives data with R1 colon five, it realizes it needs Replica 1's fifth update before it's consistent.
+
+Causal consistency is ideal for several use cases. Social media feeds need to see a post before its replies. Collaborative editing needs to see an edit before its acknowledgment. Chat applications need messages in order per conversation.
+
+The advantage over sequential consistency is higher availability and lower latency. The advantage over eventual consistency is that it respects cause and effect relationships.
+
+Eventual Consistency
+
+Now let's discuss eventual consistency, the weakest model. The definition is simple: if no new writes occur, all replicas will eventually converge to the same value.
+
+Here's an example. At time zero, you write X equals one to replica A. At time one, replica B still has X equals zero because it's stale. At time two, replica C also still has X equals zero. As replication propagates, eventually at time one hundred, all replicas have X equals one.
+
+What's not guaranteed with eventual consistency? First, there's no guarantee of how long until convergence. It could be seconds or hours. Second, there's no guaranteed order of operations. Third, there's no guarantee of what value you'll read at any point. Fourth, reads are not guaranteed to be monotonic. You might even see values go backwards.
+
+The problems with pure eventual consistency are significant. Consider a shopping cart scenario. At time zero, a user adds an item on replica A. At time one, the user views their cart on replica B, which is stale and shows an empty cart. At time two, the user thinks the item wasn't added. At time three, the user adds the item again. At time four, when both replicas eventually sync, the cart has two items instead of one.
+
+This is why pure eventual consistency is often not enough. You need to strengthen it with additional guarantees.
+
+There are several variants that strengthen eventual consistency. Read-your-writes guarantees that you see your own writes. This can be implemented with sticky sessions or version tracking. Monotonic reads guarantees that once you see X equals one, you never see X equals zero. This can be implemented by sticking to the same replica or using a version floor. Monotonic writes guarantees that your writes apply in order. This requires queuing writes and applying them sequentially. Consistent prefix guarantees that you see operations in the order they occurred. This requires an ordered replication log.
+
+For read-your-writes, the implementation looks like this: when a user reads, you first get the last write version for that user and key. Then you wait for a replica that has at least that version, and read from it.
+
+For monotonic reads, you track the last read version for each user and key. When the user reads again, you get a replica with at least that version. After reading, you update the user's last read version to the new version.
+
+Where does eventual consistency work well? DNS can take hours to propagate changes, and that's acceptable. CDN caches can serve stale content. Social media feeds can show a post ten seconds late. Product catalogs can have briefly stale prices. Lost session data is annoying but recoverable.
+
+Where does eventual consistency fail? Banking systems cannot have stale balances. Inventory systems cannot oversell. Leader election must have exactly one leader. Unique constraints cannot allow duplicate usernames.
+
+CAP and PACELC
+
+Let's discuss the CAP theorem and its extension, PACELC. The CAP theorem states that during a network partition, you must choose between consistency and availability. Consistency means every read receives the most recent write. Availability means every request receives a response. You cannot have both during a partition.
+
+Think of it as a triangle. At the top is consistency, at the bottom left is availability, and at the bottom right is partition tolerance. During a partition, you must choose one side. However, partition tolerance is not optional for distributed systems. Network failures will happen.
+
+This leads to two types of systems. CP systems are consistent and partition-tolerant. During a partition, the minority side stops accepting writes. This guarantees consistency at the cost of availability. Examples include ZooKeeper, etcd, HBase, and MongoDB with default settings.
+
+AP systems are available and partition-tolerant. During a partition, all sides continue operating. They may return stale data. Examples include Cassandra, DynamoDB, and CouchDB.
+
+The reality is that most systems are not purely CP or AP. They let you choose per operation. For example, in ZooKeeper, writes are always CP because they must reach a majority. Reads can be stale, which is AP, or linearizable, which is CP.
+
+In DynamoDB, the default is eventually consistent reads, which is AP. But you can optionally request strongly consistent reads, which is CP.
+
+In Cassandra, you can set the consistency level per query. ONE means any replica responds, which is AP. QUORUM means a majority must respond, which is CP-ish. ALL means all replicas respond, which is strongly CP.
+
+PACELC extends CAP by addressing what happens during normal operation, not just partitions. PACELC stands for: if there's a partition, choose between availability or consistency. Else, during normal operation, choose between latency or consistency.
+
+Most of the time there's no partition. You're trading latency versus consistency. For example, Dynamo and Cassandra choose availability during partitions and low latency during normal operation. MongoDB chooses consistency during partitions and low latency during normal operation. VoltDB chooses consistency in both cases. PNUTS chooses consistency during partitions and low latency during normal operation.
+
+Implementing Consistency in Practice
+
+Let's look at how real databases implement consistency. In MongoDB, you use read concerns to specify consistency levels. The local read concern reads from the node, which might be stale. The majority read concern reads data acknowledged by a majority. The linearizable read concern provides the strongest guarantee with the highest latency.
+
+For writes, MongoDB uses write concerns. W equals one means the write is acknowledged by one node. It's fast but risky. W equals majority means the write is acknowledged by a majority. It's safe. W equals the number of replicas means all nodes acknowledge. It's very safe but slow.
+
+In Cassandra, you set consistency per query. For example, you can select from a table using consistency quorum. Options include ONE, which is fast but might be stale. QUORUM means a majority of nodes agree. ALL means all replicas respond. LOCAL_QUORUM means a majority in the local datacenter, which is useful for multi-datacenter setups.
+
+In PostgreSQL with replicas, you can configure synchronous replication. You set the synchronous standby names to specify which replica to wait for. Setting synchronous commit to on means the transaction doesn't return until it's synced. You can also set this per transaction. Some transactions can wait, while others don't need to.
+
+Choosing the Right Consistency Level
+
+Here's a decision framework for choosing the right consistency level. First ask: is data loss ever acceptable? If no, you need strong consistency. Then ask: how bad is high latency? If unacceptable, you might need to reconsider your requirements. If acceptable, use linearizable or sequential consistency.
+
+If temporary inconsistency is okay, ask: does cause and effect matter? If yes, use causal consistency. If not, eventual consistency is fine. But then ask: do you need read-your-writes? If yes, use eventual consistency with session stickiness.
+
+Let's map consistency levels to specific use cases. For bank balances, use linearizable consistency because you can never show the wrong balance. For leader election, use linearizable because you need exactly one leader. For social feeds, use causal consistency to ensure you see replies after posts. For product catalogs, eventual consistency is fine because a briefly stale price is acceptable. For user sessions, use read-your-writes consistency so users see their own actions. For analytics, eventual consistency works because approximate data is fine. For shopping carts, use causal or stronger consistency so you don't lose items.
+
+Consistency Tradeoffs Summary
+
+Here's a summary of the tradeoffs. Linearizable consistency has low availability, high latency, and high complexity. It's best for locks, leader election, and banking. Sequential consistency has medium availability, medium latency, and medium complexity. It's used when total ordering is needed. Causal consistency has high availability, low latency, and medium complexity. It's ideal for social applications and collaboration. Eventual consistency has the highest availability, lowest latency, and low complexity. It's best for caching, CDNs, and analytics.
+
+Key Concepts Checklist
+
+When discussing consistency in an interview, make sure you can do the following. Clarify consistency requirements for each operation type. Distinguish between read and write consistency needs. Consider the impact of geographic distribution. Discuss CAP and PACELC tradeoffs explicitly. Mention specific consistency implementations like MongoDB read concerns and Cassandra consistency levels. Know when to use each consistency level.
+
+Practical Insights
+
+Let me share some practical insights from working with these systems in production.
+
+First, linearizability is expensive. Cross-datacenter linearizability can add one hundred to three hundred milliseconds to every operation. It's often better to use causal consistency plus conflict resolution rather than paying for linearizability.
+
+Second, consistency is per operation, not per system. Even in eventually consistent systems, you can do strongly consistent reads when needed. Design for flexibility from the start.
+
+Third, most bugs are consistency bugs. Works on my machine often means worked with one replica. Always test with realistic replication lag to catch these issues.
+
+Fourth, consider Google Spanner's approach. Spanner uses atomic clocks and GPS for global strong consistency with about seven millisecond commit wait. It requires expensive infrastructure, but it removes consistency headaches entirely. Understanding how Spanner achieves this can help you make informed decisions about whether the infrastructure cost is worth it for your use case.
+
+That concludes Chapter 3 on Consistency Models.

@@ -1,0 +1,133 @@
+Chapter 25: Authentication and Authorization
+
+Before we dive into the technical details, let's clarify two fundamental concepts that often get confused: authentication and authorization. Authentication, often abbreviated as AuthN, answers the question "Who are you?" For example, when you say "I am Alice, here's my password," you're proving your identity. Authorization, abbreviated as AuthZ, answers a different question: "What can you do?" For instance, "Alice can read documents, but not delete them" is an authorization statement that verifies permissions.
+
+The order of these operations is critical. First, you must authenticate to establish who you are, and only then can you authorize to determine what you're allowed to do. You can't grant permissions to someone until you know their identity.
+
+Let's now explore the different authentication methods you'll encounter in backend engineering.
+
+Authentication Methods
+
+Password-Based Authentication
+
+The most common form of authentication is password-based. In this flow, a user sends their username and password to the server. The server then hashes the password and compares it to the stored hash in the database's users table.
+
+Let's talk about password storage, because this is absolutely critical. You should never, under any circumstances, store plaintext passwords. Instead, you should use a strong hashing algorithm like bcrypt or argon2. Here's how bcrypt works: When you hash a password, you first generate a salt using a cost factor. The cost factor determines how many rounds of hashing will be performed, making the hash more resistant to brute-force attacks. A cost factor of 12 means 2 to the power of 12 iterations.
+
+The verify function checks if a password matches the stored hash. The beauty of bcrypt is that it includes the salt in the hash itself. If you look at a bcrypt hash, it looks something like this: dollar sign 2b dollar sign 12 dollar sign L Q v 3 c and so on. The first part indicates the algorithm version, the second part is the cost factor showing 2 to the 12 iterations, then comes the salt, and finally the actual hash.
+
+Token-Based Authentication with JWT
+
+Token-based authentication using JSON Web Tokens, or JWT, works differently. During the login flow, the user sends their username and password to the server. The server verifies the credentials, generates a JWT token, and sends it back to the user. For all subsequent requests, the user includes this JWT in the authorization header with the format "Bearer" followed by the token.
+
+The beauty of JWT is that the server can verify the token signature and extract claims without needing to look up anything in the database. This makes JWT authentication stateless and highly scalable.
+
+A JWT has three parts separated by dots. The structure looks like a long string of characters with two dots dividing it into three sections. The first part is the header, which is base64 encoded and contains information like the algorithm used, typically RS256, and the type, which is JWT. The second part is the payload, also base64 encoded, containing claims like the subject or user ID, the user's name, their roles such as admin, the issued-at timestamp, and the expiration timestamp. The third part is the signature, which is created by taking the base64 encoded header, adding a dot, adding the base64 encoded payload, and signing this with a private key using the RS256 algorithm.
+
+To verify a JWT, you decode it using the public key, specifying the algorithm as RS256, and requiring that certain fields like expiration and subject are present. You need to handle exceptions for expired tokens and invalid tokens gracefully.
+
+Comparing JWT to Sessions
+
+Let's compare JWT to traditional session-based authentication across several dimensions. For storage, JWT stores the token client-side, while sessions store data server-side in a session store. For scalability, JWT is stateless and easy to scale horizontally, while sessions require a shared session store across servers. For revocation, JWT is hard to revoke immediately because you have to wait for the token to expire, while sessions can be revoked instantly by deleting them from the store. For size, JWT tokens are larger because they carry claims, while session IDs are small. For security, both have similar risks: if a token or session ID is stolen, the attacker has full access.
+
+When should you use JWT? JWT works well for stateless microservices where you don't want to maintain server-side state, for cross-domain authentication where you need to authenticate across different domains, and for short-lived access tokens. When should you use sessions? Sessions are better for single monolithic applications, when you need instant revocation capability, and for traditional web applications where the server renders pages.
+
+Refresh Tokens
+
+Short-lived access tokens create a usability problem. If access tokens only last 15 minutes, users would need to log in frequently. The solution is refresh tokens. Here's how it works: When a user logs in, the server responds with two tokens: an access token that expires in 15 minutes, and a refresh token that lasts for 7 days. After 15 minutes, when the access token expires, the user sends the refresh token to the server. The server verifies the refresh token and issues a new access token valid for another 15 minutes.
+
+For security, you should implement refresh token rotation. This means each refresh token can only be used once. When a refresh token is used to get a new access token, you invalidate the old refresh token and issue both a new access token and a new refresh token. This prevents stolen refresh tokens from being useful for long.
+
+OAuth 2.0 and OpenID Connect
+
+OAuth 2.0 and OpenID Connect power the "Login with Google" or "Login with Facebook" buttons you see everywhere. Here's how the flow works: The user clicks "Login with Google" in your app. Your app redirects the user to Google's login page. The user logs in at Google's site. Google redirects the user back to your app with an authorization code. Your app exchanges this code with Google for an access token. Your app uses this access token to get the user's profile information from Google. Finally, the user is logged into your app using their Google identity.
+
+This flow keeps the user's password secure because your app never sees it. Google handles all the authentication, and you just receive proof that the user is who they claim to be.
+
+Authorization Models
+
+Now let's shift to authorization, which determines what authenticated users can do. There are three main authorization models you should know.
+
+Role-Based Access Control, or RBAC
+
+RBAC organizes permissions into roles. For example, you might have an admin role with permissions to read, write, delete, and manage users. An editor role might have read and write permissions. A viewer role might only have read permission. And a guest role might have no permissions at all.
+
+Users are assigned roles. Alice might be an admin, Bob might be an editor, and Carol might be a viewer. When checking permissions, you ask: Can Bob delete documents? Bob has the editor role. The editor role has read and write permissions. Delete is not in the list of read and write permissions. Therefore, the request is denied.
+
+In code, you would maintain a mapping of role names to permission lists. To check if a user has a permission, you look up their role, get the permissions for that role, and check if the requested permission is in that list. You can use decorators to require specific permissions on functions, like a "require permission delete" decorator on the delete document function.
+
+Attribute-Based Access Control, or ABAC
+
+ABAC makes authorization decisions based on attributes of the user, the resource, and the action. For example, you might have a policy that says "Users can edit documents in their department." To evaluate this, you look at attributes: the user has an ID of alice, a department of engineering, and a role of editor. The document has an ID of doc-123, a department of engineering, and an owner of bob. The action is edit.
+
+The evaluation checks if the user's department equals the document's department, and if the user's role is editor. Since both conditions are true, the request is allowed. ABAC is more flexible than RBAC because you can create fine-grained policies based on any attributes, not just predefined roles.
+
+Relationship-Based Access Control, or ReBAC
+
+ReBAC, used in systems like Google Zanzibar which powers Google Docs and Drive, models permissions as relationships between objects and users. Relationships are stored as tuples with three parts: an object, a relation, and a user.
+
+For example, you might have tuples like: document 123 has owner relationship to user alice, document 123 has viewer relationship to user bob, folder 456 is the parent of document 123, folder 456 has editor relationship to group engineering, and group engineering has member relationship to user carol.
+
+To answer "Can Carol edit document 123?" you check for paths through the relationship graph. Carol is a member of group engineering. Group engineering is an editor of folder 456. Folder 456 is the parent of document 123. Since editor permission on a parent folder grants editor permission on child documents, Carol is allowed to edit document 123.
+
+Permission Inheritance
+
+Many systems implement permission inheritance in hierarchical structures. Imagine a folder hierarchy: company folder owned by admin, which contains an engineering folder where the eng-team are editors, which contains a projects folder where all-staff are viewers, which contains a secret-project folder where only alice is an editor.
+
+The effective permissions for secret-project are the union of direct and inherited permissions. Admin is the owner inherited from the company folder. Eng-team are editors inherited from the engineering folder. All-staff are viewers inherited from the projects folder. And alice is an editor directly assigned to secret-project.
+
+API Authentication
+
+APIs need authentication too, but the methods are often different from user-facing authentication.
+
+API Keys
+
+API keys are simple bearer tokens sent with requests. A typical request includes an HTTP header like "X-API-Key" with a value like "sk_live_abc123def456." To authenticate an API key, you extract it from the request headers, check if it's present, hash it (because you should store API keys hashed just like passwords), look up the key record in the database, and verify it hasn't been revoked.
+
+Best practices for API keys include: using prefixes like "sk_live_" for live keys and "sk_test_" for test keys, hashing keys before storing them, supporting key rotation so users can replace compromised keys, scoping keys so they only have access to specific resources or operations, and setting expiration dates so old keys don't remain valid forever.
+
+Service-to-Service Authentication with Mutual TLS
+
+When two backend services need to authenticate each other, mutual TLS, or mTLS, is a common solution. Both Service A and Service B present certificates to each other. Each service verifies the other's certificate against a trusted Certificate Authority. Once both are authenticated, they communicate over an encrypted channel.
+
+This provides strong authentication because each service must possess a valid certificate signed by a trusted CA, and it provides encryption so the traffic between services cannot be intercepted.
+
+Security Best Practices
+
+Let's discuss some critical security practices for authentication and authorization.
+
+Password Requirements
+
+Modern password requirements focus on length and uniqueness over complexity. A good password validation function checks that the password is at least 12 characters long, compares it against a list of common passwords like "password123," and checks it against breach databases like Have I Been Pwned to ensure it hasn't been compromised in a data breach.
+
+Contrary to older advice, you shouldn't require special characters. Research shows that length and uniqueness matter more than complexity. The passphrase "correct horse battery staple" is much stronger than "P at sign ssw0rd exclamation mark" even though the latter has special characters.
+
+Rate Limiting Authentication Endpoints
+
+Authentication endpoints must be rate limited to prevent brute force attacks. You might limit login attempts to 5 per minute from a single IP address. You should also implement account lockout after a certain number of failed attempts, present CAPTCHAs after detecting suspicious activity, and block IP addresses that show patterns of brute force attacks.
+
+Secure Token Storage on the Client Side
+
+On web applications, refresh tokens should be stored in httpOnly cookies, which prevents JavaScript from accessing them and mitigates cross-site scripting attacks. Access tokens can be kept in memory rather than localStorage, because localStorage is vulnerable to XSS attacks.
+
+On mobile applications, use the platform's secure storage: Keychain on iOS and EncryptedSharedPreferences on Android.
+
+Never store tokens in localStorage because it's vulnerable to XSS, in URL parameters because these get logged and cached, or in plain cookies without additional protections because they're vulnerable to CSRF attacks.
+
+Key Concepts Checklist
+
+Let's recap the key concepts you should understand about authentication and authorization. You should be able to explain the difference between authentication and authorization. You should be able to describe JWT structure including the header, payload, and signature, and how verification works. You should be able to compare the trade-offs between JWT and sessions in terms of storage, scalability, revocation, size, and security. You should be able to explain the OAuth 2.0 flow for third-party login. You should be able to describe Role-Based Access Control, Attribute-Based Access Control, and Relationship-Based Access Control, and when to use each. You should know the common API authentication patterns like API keys and mTLS. And you should be able to discuss password storage best practices including hashing, salting, and using algorithms like bcrypt.
+
+Practical Insights
+
+Let me share some practical insights from real-world experience with authentication and authorization systems.
+
+For token strategy, use short-lived access tokens between 15 to 60 minutes. Use longer-lived refresh tokens between 7 to 30 days. Always rotate refresh tokens on use, meaning each refresh token can only be used once. Store refresh tokens server-side so you can revoke them when needed, such as when a user logs out or when you detect suspicious activity.
+
+For authorization at scale, cache permission checks because looking them up every time is too slow. Denormalize permissions for hot paths where performance is critical. Consider using a policy engine like Open Policy Agent for complex authorization logic. And audit all access decisions so you have a record of who accessed what and when.
+
+Think about security in layers. At the network layer, use mutual TLS, VPNs, and firewalls. At the application layer, implement authentication, authorization, and input validation. At the data layer, use encryption at rest and field-level encryption for sensitive data. For auditing, log all access attempts and use anomaly detection to identify suspicious patterns.
+
+Finally, be aware of common pitfalls. Storing JWT in localStorage makes your application vulnerable to XSS attacks. Not implementing rate limiting on login endpoints allows brute force attacks. Using predictable session IDs makes session hijacking easier. Missing CSRF protection on cookie-based authentication is a critical vulnerability. And having over-permissive default roles means new users get more access than they should. Avoid these mistakes and you'll build much more secure authentication and authorization systems.
+
+This concludes Chapter 25 on Authentication and Authorization.

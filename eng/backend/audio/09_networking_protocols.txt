@@ -1,0 +1,161 @@
+Chapter 9: Networking Protocols
+
+TCP versus UDP: The Fundamental Trade-off
+
+Let's begin by exploring the two foundational transport protocols that power nearly all network communication: TCP and UDP. Understanding when to use each one is critical for building efficient backend systems.
+
+TCP: Transmission Control Protocol
+
+TCP provides several important guarantees that make it reliable but come at a performance cost. First, it guarantees reliable delivery by retransmitting any lost packets. Second, it ensures ordered delivery so packets arrive in the exact sequence they were sent. Third, it implements congestion control to avoid overwhelming the network. And fourth, it uses flow control to prevent overwhelming the receiver.
+
+To understand how TCP works, let's walk through the connection establishment process, known as the three-way handshake. The client sends a SYN packet with a sequence number, let's say 100. The server responds with a SYN-ACK packet containing its own sequence number, let's say 200, and an acknowledgment of 101, confirming it received the client's packet. Finally, the client sends an ACK packet with acknowledgment 201, and the connection is established. Only after this handshake completes can data flow begin.
+
+TCP's reliability mechanism works like this: imagine the sender transmits three packets in sequence. Packet 1 with sequence number 1 arrives successfully, and the receiver sends back ACK 1. Packet 2 with sequence number 2 gets lost somewhere in the network. Packet 3 with sequence number 3 arrives, but since packet 2 is missing, the receiver sends another ACK 1, a duplicate acknowledgment indicating it's still waiting for packet 2. When the sender receives this duplicate ACK, it knows packet 2 was lost and retransmits it. Once packet 2 arrives, the receiver can acknowledge all three packets with ACK 3.
+
+The overhead of TCP includes a minimum header size of 20 bytes per packet, a one round-trip time delay before any data can be sent due to the handshake, and a four-way handshake process to properly tear down the connection.
+
+UDP: User Datagram Protocol
+
+In contrast, UDP provides no guarantees whatsoever. Packets may be lost and UDP won't retransmit them. Packets may arrive out of order and UDP won't reorder them. There's no congestion control and no flow control.
+
+The process is beautifully simple. The sender just fires off packets. Packet 1 goes out. Packet 2 might get lost, and there's no retransmission. Packet 3 goes out. There are no handshakes and no acknowledgments. It's a "fire and forget" protocol.
+
+The overhead of UDP is minimal: just 8 bytes for the header, no setup time, and you can start sending data immediately.
+
+When to Use Each Protocol
+
+Understanding when to use TCP versus UDP is crucial for system design decisions. For web pages, you should use TCP because you need every single byte to arrive in the correct order. For REST APIs, TCP is the right choice because request-response patterns require reliability. For database connections, data integrity is critical, so TCP is essential. For file transfers, you need the complete file, making TCP the obvious choice.
+
+However, for video streaming, UDP is better because if a frame arrives late, it's useless anyway, so it's better to skip it and move on. For voice and video calls, real-time delivery is more important than perfect delivery, so UDP wins. For online gaming, low latency is critical and worth some packet loss, so UDP is preferred. For DNS queries, you're typically sending a single packet and can retry at the application layer if needed, so UDP's simplicity is ideal. For IoT telemetry where you're sending high volumes of data and some loss is acceptable, UDP makes sense.
+
+One important real-world note: many applications you might think of as "UDP applications," like QUIC and WebRTC, actually implement their own reliability mechanisms on top of UDP for specific use cases. They get the low latency of UDP but add back just the reliability features they need.
+
+HTTP Versions
+
+Now let's explore how the HTTP protocol has evolved over time to address performance bottlenecks.
+
+HTTP version 1.1, released in 1997
+
+In HTTP 1.1, the flow looks like this: first, the client and server perform a TCP handshake. Then the client sends a GET request for page.html and waits for the response. Only after receiving that response can it send the next request for style.css, and it has to wait again. Then it requests app.js and waits yet again.
+
+The main problem here is called head-of-line blocking, where request 2 must wait for response 1 to complete before it can be sent. Browsers worked around this limitation by opening 6 parallel connections to the same server. Another workaround was domain sharding, where you'd split assets across multiple domain names like assets1.com and assets2.com to get more parallel connections.
+
+HTTP 1.1 did introduce connection reuse through the Keep-Alive feature. In HTTP 1.0, every request required a new TCP connection. In HTTP 1.1, you could reuse the same connection, but requests still had to be processed sequentially.
+
+HTTP version 2, released in 2015
+
+HTTP 2 introduced multiplexing over a single TCP connection. Imagine a single TCP connection as a pipe, and inside that pipe you can have multiple streams flowing simultaneously. Stream 1 requests page.html, stream 2 requests style.css, and stream 3 requests app.js, all concurrently over the same connection. Responses can arrive in any order and be processed independently.
+
+HTTP 2 brought several key features. First, it's a binary protocol rather than text-based, which makes parsing more efficient. Second, it includes header compression using an algorithm called HPACK, because headers are often highly redundant. Third, it supports server push, where the server can send resources to the client before the client even asks for them. Fourth, it allows stream prioritization so critical resources can be delivered first.
+
+Let me explain header compression with an example. In request 1, you send headers including method GET, path slash page.html, authority example.com, a long user-agent string, accept text/html, and a cookie with session equals abc123. In request 2, you send method GET, path slash style.css, and notice that the authority, user-agent, and cookie are all exactly the same as request 1. Only the path and accept headers are different. HPACK compression means you only send the differences and reference the previous headers, dramatically reducing overhead.
+
+However, HTTP 2 still suffers from TCP head-of-line blocking at a lower level. Remember, TCP is a single ordered stream. If packet 3 is lost, streams 1, 2, and 3 are all blocked at the TCP level, even if the lost packet was only relevant to stream 3. This happens because TCP doesn't understand HTTP streams; it just sees a stream of bytes that must be delivered in order.
+
+HTTP version 3 using QUIC, released in 2022
+
+HTTP 3 takes a radical approach: it's built on UDP instead of TCP. Picture a QUIC connection running over UDP, with streams 1, 2, and 3 multiplexed inside. If a packet is lost that belongs only to stream 3, only stream 3 is blocked. Streams 1 and 2 continue normally.
+
+QUIC brings several key improvements. First, there's no head-of-line blocking. When packet loss occurs on stream 3, streams 1 and 2 continue normally while only stream 3 waits for retransmission. Each stream has independent loss recovery.
+
+Second, QUIC supports zero round-trip time connection resumption. The first connection requires a one round-trip time handshake, similar to TCP plus TLS. But on subsequent connections to the same server, the client can send encrypted request data immediately with the connection request, with zero round-trip time required. The connection resumes immediately without waiting for a handshake.
+
+Third, QUIC enables connection migration. Consider a scenario where your phone switches from WiFi to cellular. With TCP, the connection is tied to your IP address and port number. When your IP changes, the connection breaks and you have to start over. With QUIC, the connection is identified by a connection ID that's independent of the IP address. When your IP changes, the connection seamlessly continues. This is a game-changer for mobile devices.
+
+Fourth, QUIC has built-in encryption. With TCP and TLS, encryption is optional and layered on top. With QUIC, TLS version 1.3 is mandatory and integrated into the protocol. All QUIC traffic is encrypted, always.
+
+Comparing HTTP Versions
+
+Let's compare the three versions across several dimensions. For transport layer, HTTP 1.1 and HTTP 2 both use TCP, while HTTP 3 uses UDP through QUIC. For multiplexing, HTTP 1.1 has none, while both HTTP 2 and 3 support it. For header compression, HTTP 1.1 has none, HTTP 2 uses HPACK, and HTTP 3 uses QPACK. Both HTTP 2 and 3 support server push, while HTTP 1.1 does not. For head-of-line blocking, HTTP 1.1 has it at the application level, HTTP 2 has it at the TCP level, and HTTP 3 eliminates it entirely. Only HTTP 3 supports zero round-trip time resumption and connection migration. For encryption, it's optional in HTTP 1.1 and 2, but mandatory in HTTP 3.
+
+Real-Time Communication Patterns
+
+Now let's discuss different patterns for achieving real-time communication between clients and servers.
+
+Long Polling
+
+Long polling works like this: the client sends a GET request for updates to the server. The server doesn't respond immediately. Instead, it waits, holding the connection open. It keeps waiting, maybe for 30 seconds or until new data arrives. When new data finally arrives, the server sends a response. Immediately upon receiving that response, the client sends another GET request for updates, and the cycle repeats.
+
+Here's how you might implement this on the server side. You define a function called get_updates that accepts a request and a timeout parameter, let's say 30 seconds. You record the start time, then enter a loop that runs until the timeout is reached. Inside the loop, you check for updates for the requesting user. If data is found, you immediately return it in a response. If not, you sleep for half a second and check again. If the timeout expires with no updates, you return an empty response with status 204, signaling the client to reconnect.
+
+The advantages of long polling are that it works everywhere using just standard HTTP, it's simple to implement, and it's firewall friendly. The disadvantages are connection overhead on each polling cycle, the server must hold many connections open simultaneously, and there's latency up to the polling interval.
+
+Server-Sent Events
+
+Server-Sent Events, or SSE, works differently. The client sends a GET request to an events endpoint. The server responds with HTTP 200 and keeps the connection open. Then it can send data messages whenever it wants: data message 1, data message 2, data message 3, and so on. The connection stays open indefinitely, with the server pushing data as events occur. Later it might send data message 4. The connection remains persistent.
+
+The event format is text-based. Each event has a type, like "message," followed by data, which might be JSON like user alice saying hello. Another event might be type notification with data containing an alert about a new order. You can even send keepalive ping events to ensure the connection stays active.
+
+On the client side in JavaScript, you create an EventSource object pointing to the events endpoint. You add event listeners for different event types. For the message event, you parse the JSON data and process it. For the notification event, you might show a notification to the user. The EventSource has built-in error handling and auto-reconnect functionality. If the connection is lost, it will automatically reconnect.
+
+The advantages of SSE are that it's simple, using just HTTP, auto-reconnect is built in, you can have different event types for routing messages, and it works well with HTTP 2 multiplexing. The disadvantages are that it's unidirectional, only server to client, it's text only with no binary support, and Internet Explorer doesn't support it, though polyfills exist.
+
+Typical use cases include live feeds, notifications, dashboards, and stock tickers.
+
+WebSockets
+
+WebSockets provide true bidirectional communication. The client sends an HTTP Upgrade request. The server responds with status 101 Switching Protocols. At this point, the connection upgrades from HTTP to the WebSocket protocol. Now you have a persistent, bidirectional, full-duplex connection. Messages can flow in both directions simultaneously. The client can send a message, the server can send a message, the client sends another, the server responds, and so on, all over the same connection.
+
+The upgrade handshake starts with an HTTP GET request including special headers: Upgrade websocket, Connection Upgrade, a Sec-WebSocket-Key for security, and Sec-WebSocket-Version 13. The server responds with HTTP 101 Switching Protocols, echoing the Upgrade and Connection headers, and providing a Sec-WebSocket-Accept key that proves it understood the request.
+
+On the client side in JavaScript, you create a WebSocket object with a secure WebSocket URL starting with wss. When the connection opens, you might send a JSON message to join a specific room. The onmessage handler receives incoming messages, parses the JSON data, and processes it. You can send messages anytime using the send method with JSON-encoded data.
+
+On the server side in Python using the websockets library, you define an asynchronous handler function that receives the websocket connection and path. You iterate over incoming messages asynchronously. For each message, you parse the JSON. If the message type is join, you add the user to a room. If the message type is message, you broadcast the text to everyone in that room.
+
+The advantages of WebSockets are bidirectional communication, low latency, binary data support, and persistent connections. The disadvantages are that they're stateful, making them harder to scale, load balancing becomes complex and typically requires sticky sessions, you may encounter firewall or proxy issues, and they're more complex to implement than SSE.
+
+Typical use cases include chat applications, online gaming, collaborative editing tools, and trading platforms.
+
+Comparing Real-Time Patterns
+
+Let's compare the three patterns. For communication direction, long polling and SSE only support server to client, while WebSockets are bidirectional. For connection model, long polling creates a new connection for each message, while SSE and WebSockets maintain persistent connections. For protocol, long polling and SSE use standard HTTP, while WebSockets use a dedicated WS or WSS protocol. For binary data support, long polling can encode binary data as text, SSE doesn't support binary, and WebSockets natively support binary. For auto-reconnect, long polling requires manual implementation, SSE has it built in, and WebSockets require manual implementation. For browser support, long polling is universal, while SSE and WebSockets have good modern browser support. For scaling, long polling is the easiest, SSE is medium difficulty, and WebSockets are the hardest to scale.
+
+gRPC
+
+What is gRPC?
+
+gRPC combines Protocol Buffers for binary serialization with a schema-first approach, together with HTTP 2 for multiplexing, streaming, and header compression. This combination creates an efficient RPC framework for remote procedure calls.
+
+Protocol Buffer Definition
+
+You define your service contract in a protocol buffer file with the proto3 syntax. Let's say you're building a user service. You define a service called UserService with several RPC methods. First is GetUser, a unary RPC that takes one request and returns one response. Second is ListUsers, which uses server streaming: one request, but a stream of response messages. Third is UploadUsers, which uses client streaming: a stream of requests, but one response. Fourth is Chat, which is bidirectional streaming in both directions.
+
+You also define the message types. A User message might have an id field as a 64-bit integer, a name string, an email string, and a repeated field for roles, meaning a user can have multiple roles. The GetUserRequest message just has an id field. The ListUsersRequest has fields for pagination like page_size and page_token.
+
+Streaming Patterns
+
+Let's walk through each pattern. For unary RPC, the simplest case, the client sends a GetUser request with id 123, and the server responds with a User object containing all the user data.
+
+For server streaming, the client sends one ListUsers request asking for 100 users. The server then streams back users one at a time: User with id 1, User with id 2, User with id 3, continuing all the way to User with id 100.
+
+For client streaming, the flow reverses. The client streams multiple User objects to the server, one after another. When finished, the client signals the end of the stream. The server then responds with a single UploadSummary message, perhaps saying it received 3 users.
+
+For bidirectional streaming, both sides can send messages concurrently without waiting. The client sends a chat message, the server sends a chat message back, the client sends two more messages, the server sends another message. Messages flow in both directions simultaneously.
+
+gRPC versus REST
+
+Let's compare gRPC to traditional REST APIs across several dimensions. For protocol, gRPC uses HTTP 2, while REST typically uses HTTP 1.1 or 2. For data format, gRPC uses Protocol Buffers which are binary, while REST typically uses JSON which is text-based. For schema, gRPC requires a .proto schema file, while REST has optional OpenAPI specifications. For code generation, gRPC automatically generates client and server code, while REST requires manual implementation or optional code generation. For streaming, gRPC natively supports all streaming patterns, while REST has limited streaming capabilities. For browser support, gRPC requires a special grpc-web bridge with limitations, while REST has universal browser support. For performance, gRPC is higher because messages are smaller and parsing is faster, while REST has lower performance. For human readability, gRPC messages are not human-readable binary, while REST JSON is easily readable. For debugging, gRPC needs specialized tools, while REST can be debugged with simple tools like curl or a browser.
+
+When to Use gRPC
+
+You should use gRPC for internal microservices communication, performance-critical code paths, when you need streaming capabilities, when you want strong typing enforced across services, and in polyglot environments where automatic code generation helps teams using different programming languages work together.
+
+You should use REST for public-facing APIs, when serving browser clients directly, for simple CRUD operations, when human readability and easy debugging are important, and when integrating with third-party systems that expect REST.
+
+Key Concepts Checklist
+
+Let's review the key concepts you should be able to explain. First, explain the trade-offs between TCP and UDP, including when each is appropriate. Second, describe the evolution of HTTP from version 1.1 through version 2 to version 3, and what problems each version solved. Third, explain head-of-line blocking at both the application and transport layers, and how QUIC solves it. Fourth, compare the different real-time communication patterns: long polling, server-sent events, and WebSockets, including their trade-offs. Fifth, explain what gRPC is and when you should use it over REST. Sixth, be able to design the appropriate protocol choice for a given scenario, weighing all the trade-offs.
+
+Practical Insights
+
+Let me share some practical insights for choosing and implementing these protocols in production systems.
+
+For protocol selection, use this framework. First, if you're building a public API, use REST for universal compatibility. Second, if it's an internal service with high throughput requirements, use gRPC for efficiency. Third, if you need real-time updates but only server-to-client push, use SSE for its simplicity. Fourth, if you need real-time bidirectional communication, use WebSockets for full-duplex capability. Fifth, if you're serving mobile clients over unreliable networks, consider HTTP 3 for its connection migration features.
+
+For HTTP 3 adoption, check that your CDN and load balancers support it. Make sure you fall back to HTTP 2 gracefully for clients that don't support HTTP 3. Monitor the actual performance difference between QUIC and TCP in your environment. Be aware that some networks throttle UDP traffic, which can affect QUIC performance.
+
+For scaling WebSockets, remember that sticky sessions are required so a client always connects to the same server instance. Each server has connection limits, so plan your capacity accordingly. Consider using connection pooling services to manage large numbers of connections. Use Redis Pub/Sub or a similar system for sending messages across servers, since WebSocket connections are stateful and tied to specific server instances.
+
+For gRPC in production, invest in good observability tooling since debugging binary protocols is harder. Always use deadlines, not just timeouts, to ensure requests don't run forever. Implement proper error codes so clients can distinguish between different failure modes. If you need to support browser clients, consider using grpc-web, though be aware of its limitations compared to native gRPC.
+
+This concludes Chapter 9 on Networking Protocols.

@@ -1,0 +1,203 @@
+Chapter 6: Load Balancing
+
+Why Load Balancing?
+
+A single server has hard limits that you can't avoid. First, there's availability. If your server dies, you have a complete outage. Second, there's scalability. One server only has finite CPU, memory, and network capacity. And third, there's maintenance. You can't upgrade your server without downtime.
+
+A load balancer solves these problems by distributing requests across multiple servers. Picture this: a client sends a request, which first hits the load balancer. The load balancer then distributes that request to one of several backend servers, let's say Server 1, Server 2, or Server 3.
+
+With this setup, you can now do three important things. You can handle more traffic through horizontal scaling. You can survive server failures by removing unhealthy servers from the pool. And you can deploy without downtime using rolling updates.
+
+Layer 4 versus Layer 7 Load Balancing
+
+The "layer" in Layer 4 and Layer 7 refers to the OSI network model, which is a conceptual framework for understanding how networks communicate.
+
+Let's start with Layer 4, which operates at the Transport Layer.
+
+A Layer 4 load balancer operates on the TCP or UDP level. It only sees network information. Here's what a Layer 4 load balancer can see: the source IP address, like 203.0.113.50, the destination IP, the source port, the destination port like 443, and the protocol being used, such as TCP.
+
+But here's what a Layer 4 load balancer cannot see: HTTP headers, URLs, cookies, or the request body. It's completely blind to application-level information.
+
+Here's how it works. First, a client connects to the load balancer's IP address on port 443. Second, the load balancer picks a backend server, let's say server 2. Third, the load balancer rewrites the packet's destination to server 2's IP address using network address translation, or NAT. Fourth, packets flow to server 2. Fifth, response packets are NAT'd back through the load balancer to the client. And sixth, the client thinks it's talking to the load balancer the whole time. It has no idea there are multiple backend servers.
+
+Layer 4 load balancers have several characteristics. They're very fast because they only do packet forwarding. They have no protocol awareness, meaning they don't understand HTTP. They don't do SSL termination, so they pass encrypted traffic through. Their routing decisions are based only on IP addresses and ports. And they maintain state on a per TCP connection basis.
+
+Use cases for Layer 4 load balancing include TCP services like databases, Redis, and message queues. They're also great for very high throughput requirements, like millions of connections. Use them when you don't need content-based routing. Examples include gaming servers and MQTT brokers.
+
+Now let's talk about Layer 7, which operates at the Application Layer.
+
+A Layer 7 load balancer operates on the HTTP or HTTPS level. It understands application protocols. Here's what a Layer 7 load balancer can see: the full HTTP request, the URL like /api/users/123, headers such as Authorization, Accept-Language, and Cookie, the HTTP method like GET or POST, and even the request body if needed.
+
+The workflow is different from Layer 4. First, the client sends an HTTP request to the load balancer. Second, the load balancer terminates the TCP connection and does full HTTP parsing. Third, the load balancer inspects the HTTP request, looking at the URL, headers, and so on. Fourth, the load balancer establishes a new TCP connection to the backend server. Fifth, the load balancer forwards the request, potentially modifying it along the way. Sixth, the load balancer receives the response from the backend. And seventh, the load balancer forwards the response to the client.
+
+Layer 7 load balancers have powerful capabilities. They can do URL-based routing, sending requests to /api to API servers, /static to a CDN origin, and /admin to admin servers. They can do header-based routing, sending French language requests to French servers, or mobile user agents to mobile-optimized servers. They support cookie-based affinity, where a session ID always goes to the same server. They can modify requests by adding headers like X-Request-ID, rewriting URLs, or injecting security headers. They can even cache GET responses at the load balancer level, and compress responses before sending them to the client.
+
+Use cases for Layer 7 load balancing include HTTP and HTTPS web services, microservices routing, A/B testing and canary deployments, and API gateway functionality.
+
+Let's compare Layer 4 and Layer 7. Layer 4 is faster, while Layer 7 is slower due to more processing. Layer 4 doesn't do SSL termination, but Layer 7 does. Layer 4 can't do content routing, but Layer 7 can. For WebSocket support, Layer 4 offers pass-through, while Layer 7 offers full support. Layer 4 has lower connection overhead, while Layer 7 has higher overhead because it maintains two separate connections. And finally, Layer 4 is cheaper, while Layer 7 is more expensive.
+
+Load Balancing Algorithms
+
+Now let's explore the different algorithms load balancers use to distribute traffic.
+
+Algorithm 1: Round Robin
+
+Round Robin is the simplest algorithm. It rotates through servers in order. Request 1 goes to Server A, Request 2 goes to Server B, Request 3 goes to Server C, Request 4 goes back to Server A, Request 5 goes to Server B, and so on.
+
+The pros are that it's simple and provides even distribution of request count. The cons are that it assumes all servers are equal and all requests have equal cost, which is rarely true in practice.
+
+When should you use it? For stateless services with homogeneous servers where all requests take roughly the same time to process.
+
+Algorithm 2: Weighted Round Robin
+
+What if your servers have different capacities? That's where weighted round robin comes in. You give each server a weight based on its capacity.
+
+For example, say Server A has a weight of 5, Server B has a weight of 3, and Server C has a weight of 2. The total weight is 10. If you distribute 10 requests, the pattern would be: A, A, A, A, A, B, B, B, C, C. This means Server A handles 50 percent of requests, Server B handles 30 percent, and Server C handles 20 percent.
+
+The use case is when you have mixed hardware, like when a new server has twice the capacity of an old one.
+
+Algorithm 3: Least Connections
+
+Least Connections routes traffic to the server with the fewest active connections. Imagine your current active connections are: Server A has 50 connections, Server B has 30 connections, and Server C has 45 connections. The new request would go to Server B because it has the fewest connections.
+
+Why is this better than Round Robin? Let me illustrate with an example. Say you're using Round Robin. Request 1 takes 10 milliseconds and goes to Server A. Request 2 is a slow query that takes 10,000 milliseconds and goes to Server B. Request 3 takes 10 milliseconds and goes to Server C. Request 4 takes 10 milliseconds and goes to Server A. Request 5 takes 10 milliseconds and goes to Server B, but Server B is still processing that slow query from Request 2! So Server B gets overloaded despite what seems like fair distribution.
+
+With Least Connections, after Request 2, Server B has 1 connection while others have 0. So Requests 3, 4, 5, 6, and so on all go to Servers A and C. Server B gets to handle that slow query without additional requests piling up.
+
+The use case for Least Connections is when you have requests with varying processing times or long-lived connections.
+
+Algorithm 4: Weighted Least Connections
+
+This combines weights with connection count. The score is calculated as active connections divided by weight. For example, Server A has 50 connections and weight 5, giving it a score of 10. Server B has 30 connections and weight 3, also giving it a score of 10. Server C has 18 connections and weight 2, giving it a score of 9. The new request goes to Server C because it has the lowest score.
+
+Algorithm 5: Least Response Time
+
+This algorithm routes to the server responding fastest. If the recent average response times are: Server A at 50 milliseconds, Server B at 30 milliseconds, and Server C at 100 milliseconds, the new request goes to Server B.
+
+This is often combined with connection count using the formula: score equals active connections multiplied by average response time.
+
+The use case is for heterogeneous backends and detecting degraded servers.
+
+Algorithm 6: IP Hash
+
+IP Hash uses a hash of the client's IP address to determine the server. The same client always hits the same server. Here's how it works in code terms: you define a function that takes the client IP and the list of servers, then returns the server at the index of the hash of the client IP modulo the number of servers. So Client 1.2.3.4 always goes to Server B, and Client 5.6.7.8 always goes to Server A.
+
+The pros are that you get session stickiness without cookies. The cons are uneven distribution if clients have different request rates.
+
+The use case is simple session affinity for legacy applications.
+
+Algorithm 7: Consistent Hashing
+
+Consistent Hashing is like IP Hash, but adding or removing servers doesn't reshuffle everything. Imagine a hash ring, which is like a circle, with servers and client IPs positioned around it. Client 1 walks clockwise around the ring and hits Server A. Client 2 walks clockwise and hits Server D.
+
+Now, if you add Server E between C and D, only the clients between C and E move to E. Everyone else remains unchanged. This is much more stable than regular hashing.
+
+The use case is for caching layers and stateful services where reshuffling is expensive.
+
+Session Affinity, or Sticky Sessions
+
+Now let's discuss a common challenge: session affinity, also known as sticky sessions.
+
+The Problem
+
+Stateful applications store session data in server memory. Imagine Request 1 goes to Server A. Server A creates a session and stores user ID equals 123 in memory. Then Request 2 comes in and Round Robin sends it to Server B. Server B says "Who are you? I don't have a session for you!" And the user gets logged out, which is obviously frustrating.
+
+Solution 1: Load Balancer Sticky Sessions
+
+The load balancer can track which server each client should use. Here's how it works. On the first request from Client X, the load balancer routes to Server A using its normal algorithm. The load balancer remembers that Client X should go to Server A. The load balancer inserts a cookie like SERVERID equals server-a. On subsequent requests from Client X, the load balancer sees the cookie SERVERID equals server-a and routes to Server A.
+
+The problem with this approach is that if Server A dies, all those sessions are lost.
+
+Solution 2: Shared Session Store
+
+With this approach, all servers use external session storage. Picture Redis sitting at the top, containing session data like session:abc123 equals user ID 123, cart contents, and so on. Below it are Server A, Server B, and Server C, all connected to Redis.
+
+Any server can handle any request. When a request comes in, the handler gets the session ID from the request cookies, fetches the session data from Redis, and now has the same session data regardless of which server is handling the request.
+
+The problem with this approach is that Redis becomes a critical dependency. If Redis goes down, your entire application loses session state.
+
+Solution 3: Stateless Design, which is the best approach
+
+Store the session in a signed token on the client side. This is typically done with JWT, or JSON Web Tokens. The JWT token contains information like user ID equals 123, email equals user@example.com, roles equals admin, and an expiry timestamp, plus a cryptographic signature.
+
+Each request includes the token in a header. Any server can validate the signature and extract the data. No session storage is needed at all!
+
+The problem with this approach is that you can't easily invalidate tokens, which makes logout tricky. The solution is to use short expiry times with refresh tokens, or maintain a token blacklist.
+
+Health Checks
+
+How does the load balancer know if a server is healthy?
+
+Active Health Checks
+
+With active health checks, the load balancer periodically pings backends. Every 10 seconds, the load balancer sends a GET request to /health on Server A. Server A responds with 200 OK and a JSON body saying status: healthy. The load balancer sends the same request to Server B, which responds with 503 Service Unavailable. The load balancer sends the request to Server C, but there's a timeout with no response.
+
+The result is that Server A is marked healthy, Server B is marked unhealthy due to the bad response, and Server C is marked unhealthy due to the timeout.
+
+Here's a typical health check configuration. You set a path like /health, an interval of 10 seconds meaning check every 10 seconds, a timeout of 5 seconds meaning fail if there's no response in 5 seconds, a healthy threshold of 2 meaning 2 consecutive successes mark the server as healthy, and an unhealthy threshold of 3 meaning 3 consecutive failures mark the server as unhealthy.
+
+What should your health endpoint check? It should check critical dependencies. You might check if the database is alive by executing SELECT 1. You might check if the cache is alive by running a ping command on Redis. If everything succeeds, return status: healthy with a 200 status code. If anything fails, return status: unhealthy with the error message and a 503 status code.
+
+Passive Health Checks
+
+With passive health checks, the load balancer monitors actual request traffic. The load balancer observes that Server A has a 0.1 percent error rate, so it's healthy. Server B has a 15 percent error rate, so it's degraded and the load balancer reduces traffic to it. Server C has a 100 percent connection refused rate, so it's unhealthy and gets removed from the pool.
+
+No separate health endpoint is needed. Real-world traffic provides a real health signal.
+
+The best practice is to use both active and passive health checks together.
+
+High Availability for Load Balancers
+
+Here's an important realization: the load balancer is itself a single point of failure!
+
+Solution 1: DNS Round Robin
+
+With DNS Round Robin, api.example.com resolves to multiple IP addresses: 10.0.0.1, 10.0.0.2, and 10.0.0.3, corresponding to Load Balancer 1, Load Balancer 2, and Load Balancer 3. Client DNS resolution returns a random load balancer.
+
+The problem is that DNS caching causes uneven distribution and slow failover.
+
+Solution 2: Active-Passive with VRRP
+
+This uses a Virtual IP, or VIP. Picture a virtual IP of 192.168.1.100 sitting at the top. Below it are Load Balancer 1 marked as ACTIVE and Load Balancer 2 marked as STANDBY.
+
+During normal operation, Load Balancer 1 owns the VIP and serves all traffic. Load Balancer 2 monitors Load Balancer 1 with a heartbeat.
+
+During failover, Load Balancer 1 fails and Load Balancer 2 detects the missing heartbeat. Load Balancer 2 claims the VIP using a gratuitous ARP announcement. Failover happens in seconds.
+
+This uses VRRP, which stands for Virtual Router Redundancy Protocol. It's a standard protocol for this exact purpose.
+
+Solution 3: Active-Active with Anycast
+
+With Anycast, multiple load balancers advertise the same IP via BGP, the Border Gateway Protocol. The same IP address, like 1.2.3.4, is advertised by load balancers worldwide. You might have Load Balancer US, Load Balancer EU, and Load Balancer AP in the Asia-Pacific region.
+
+Routing works based on network proximity. US users get routed to Load Balancer US because it's the shortest BGP path. EU users get routed to Load Balancer EU. AP users get routed to Load Balancer AP.
+
+If one load balancer fails, BGP withdraws the route and traffic automatically reroutes to the other load balancers.
+
+This approach is used by Cloudflare, AWS Global Accelerator, and all major CDNs.
+
+Cloud Load Balancers
+
+Let's look at what the major cloud providers offer.
+
+AWS has several options. ALB, or Application Load Balancer, operates at Layer 7 and supports HTTP, HTTPS, WebSocket, and path routing. NLB, or Network Load Balancer, operates at Layer 4 and supports TCP and UDP with static IP and extreme performance. CLB, or Classic Load Balancer, is legacy and supports both Layer 4 and Layer 7. GWLB, or Gateway Load Balancer, operates at Layer 3 and is for security appliances.
+
+GCP also has several options. HTTP(S) Load Balancer operates at Layer 7 with global anycast and managed SSL. TCP Proxy Load Balancer operates at Layer 4 with TLS termination. Network Load Balancer operates at Layer 4 and is regional with pass-through.
+
+Azure offers Application Gateway at Layer 7 with WAF, or Web Application Firewall, included. Azure Load Balancer operates at Layer 4 and is regional. Traffic Manager operates at the DNS level and provides global DNS-based routing. Front Door operates at Layer 7 and provides global CDN plus load balancing.
+
+Key Concepts Checklist
+
+Let's review the key concepts you should understand. First, choose Layer 4 versus Layer 7 based on your requirements. Second, select the appropriate algorithm, using least connections for variable-duration requests. Third, design health checks using both active and passive approaches. Fourth, address load balancer high availability with either active-passive or anycast. Fifth, consider cloud provider options. And sixth, handle session affinity if needed, but prefer stateless design.
+
+Practical Insights
+
+Let me share some practical insights from real-world experience.
+
+For the Layer 4 versus Layer 7 decision, default to Layer 7 for HTTP services because you get more visibility and features. Use Layer 4 when Layer 7 overhead is unacceptable, like in gaming or high-frequency trading. And use Layer 4 for TCP services like databases and message queues.
+
+For health check tuning, be aware of two extremes. Too aggressive health checking causes flapping, where servers rapidly switch between healthy and unhealthy states. Too relaxed health checking causes slow failover and requests hit dead servers. A good starting point is a 10 second interval, 5 second timeout, and 3 failures to mark as unhealthy.
+
+For connection draining, when you remove a server, let existing connections finish. AWS calls this "deregistration delay." A typical value is 30 to 300 seconds depending on your request duration.
+
+Finally, here are the key metrics to watch. Monitor the request rate per backend. Watch the error rate per backend. Track active connections per backend. Monitor health check status. And monitor load balancer CPU and memory, because the load balancer itself can become a bottleneck.

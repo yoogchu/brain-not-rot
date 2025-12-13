@@ -1,0 +1,193 @@
+Chapter 2: Sharding and Partitioning
+
+The Scaling Wall
+
+Imagine your PostgreSQL database hits 2 terabytes. At this point, you're hitting hard limits on a single node. Let me walk you through what happens. First, storage becomes a problem. While SSDs can technically top out at around 30 terabytes, query performance degrades long before you reach that limit. Second, memory becomes an issue. When you can't fit your working set in RAM anymore, disk input-output operations kill your performance. Third, CPU constraints emerge. A single machine simply can't handle 100,000 or more queries per second for complex queries. And finally, backup and recovery becomes a nightmare. A 2 terabyte backup takes hours to complete, and restoring that backup takes even longer.
+
+Vertical scaling, which means getting a bigger machine, has its limits. Eventually, you need horizontal scaling, which means spreading your data across more machines.
+
+This is where sharding comes in. Sharding means splitting your data across multiple machines, where each shard holds a subset of your data.
+
+Think of it this way: you start with one original database containing user 1, user 2, user 3, all the way up to user 1 million. When you apply sharding, you split this into multiple shards. For example, shard 1 might hold users 1 through 333,000, shard 2 holds users 333,000 through 666,000, and shard 3 holds users 666,000 through 1 million. Each shard is a complete database that can be queried independently.
+
+Choosing a Shard Key
+
+The shard key determines which shard holds each record. This is a critical decision that's incredibly hard to change later, so you need to get it right from the start.
+
+A good shard key has several important properties. First, it needs high cardinality, which means many unique values. For example, user ID might have billions of unique values, while country only has around 200. Second, it needs even distribution to avoid hot spots. For instance, using created timestamp creates hot spots because all current writes go to the newest shard. Third, it needs query alignment, meaning most of your queries should hit a single shard. And fourth, it should be immutable. Changing a shard key requires migrating data, which is extremely expensive.
+
+Let me give you some concrete examples organized by application type.
+
+For e-commerce applications, a good shard key is customer ID because orders naturally belong to one customer. A bad choice would be order date, because that creates a hot shard for the current day where all new orders are being written.
+
+For social media applications, user ID is a good choice because user data gets colocated. A bad choice would be post ID, because then you'd need cross-shard queries to build user feeds.
+
+For multi-tenant Software as a Service applications, tenant ID is the right choice because it provides tenant isolation. Again, created timestamp would be bad due to time-based hot spots.
+
+For gaming applications, game ID works well because game state gets colocated. Player ID would be problematic because multiple players participate in each game, requiring cross-shard queries.
+
+For Internet of Things applications, device ID is a good choice because device data gets colocated. Timestamp would be terrible because all current data ends up on one shard.
+
+When deciding on a shard key, you should ask yourself four key questions. First, what queries are most common? Your shard key should appear in the WHERE clause of these queries. Second, what data is accessed together? You want to colocate related data. Third, what will grow over time? High-cardinality keys scale better. And fourth, what won't change? Immutable keys help you avoid expensive migrations.
+
+Sharding Strategies
+
+There are several main strategies for sharding your data. Let me walk through each one.
+
+Strategy 1: Range-Based Sharding
+
+Range-based sharding divides your key space into contiguous ranges. For example, shard 1 might hold user IDs 1 through 1 million, shard 2 holds user IDs 1 million and 1 through 2 million, and shard 3 holds user IDs 2 million and 1 through 3 million.
+
+Here's how it works in practice. When you need to find which shard holds a particular user ID, you check if the user ID is less than or equal to 1 million, in which case it goes to shard 1. If it's less than or equal to 2 million, it goes to shard 2. Otherwise, it goes to shard 3.
+
+Range-based sharding has several advantages. Range queries are efficient. For example, a query asking for user IDs between 1000 and 2000 only hits one shard. It's also easy to understand and implement. And sequential IDs naturally distribute across the ranges.
+
+However, there are significant disadvantages. It creates hot spots for time-series data where all current writes hit the latest range. It can lead to uneven distribution if keys aren't uniformly distributed. And resharding requires moving contiguous ranges around.
+
+Let me give you a concrete example of the hot spot problem. Imagine you're sharding by order date. Shard 1 holds 2023 orders, which are old and rarely accessed. Shard 2 holds 2024 orders, which is where all current traffic is going. Shard 3 holds 2025 orders, which is still empty. In this scenario, 90% of your queries hit shard 2, creating a severe hot spot.
+
+Strategy 2: Hash-Based Sharding
+
+Hash-based sharding uses a hash function on the key, then takes the modulo by the number of shards. For example, if you hash the string "user123" you might get 847291. Then 847291 mod 3 equals 1, so this goes to shard 1.
+
+The advantages of hash-based sharding are significant. You get even distribution, assuming you have a good hash function. There are no hot spots from key distribution patterns. And it's simple to implement.
+
+However, the disadvantages are severe. Range queries get scattered across all shards, making them expensive. And adding shards causes most of your data to move, which is catastrophic.
+
+Let me explain the resharding problem in detail. Before resharding, you have 3 shards. The hash of "user123" mod 3 equals 1, so it goes to shard 1. After you add a 4th shard, the hash of "user123" mod 4 equals 3, so now it goes to shard 3. The data has moved! When going from 3 to 4 shards, approximately 75% of your data has to move to different shards. This is why simple hash sharding doesn't work for production systems.
+
+Strategy 3: Consistent Hashing
+
+Consistent hashing is the solution to the resharding problem. It works by hashing both your data and your nodes onto a ring.
+
+Imagine a circle representing 0 to 360 degrees. You place your nodes at various points on this ring. For example, Node A might be at 45 degrees, Node B at 135 degrees, Node C at 225 degrees, and Node D at 315 degrees. You also hash your keys onto this ring. Key X might hash to 100 degrees, Key Y to 200 degrees, and Key Z to 300 degrees.
+
+To find which node stores a particular key, you walk clockwise from the key's position until you hit a node. So Key X at 100 degrees walks clockwise and hits Node B at 135 degrees. Key Y at 200 degrees walks clockwise and hits Node C at 225 degrees. Key Z at 300 degrees walks clockwise and hits Node D at 315 degrees.
+
+The magic happens when you add a new node. Let's say you add Node E between C and D, perhaps at 270 degrees. Before adding Node E, Key Z at 300 degrees belonged to Node D. After adding Node E, Key Z now belongs to Node E because it's the first node clockwise from 300 degrees. However, Key X still belongs to Node B, unchanged. And Key Y still belongs to Node D, unchanged. Only the keys between C and E move to the new node. This means roughly 1 over N of your data moves, instead of N minus 1 over N.
+
+Virtual Nodes
+
+There's a problem with basic consistent hashing. With only 4 physical nodes on the ring, the distribution might be uneven. The solution is virtual nodes, also called V-nodes.
+
+Instead of placing each physical node once on the ring, you place it 100 to 200 times at different positions. Physical Node A gets virtual nodes A underscore 0, A underscore 1, A underscore 2, all the way up to A underscore 150. Physical Node B gets virtual nodes B underscore 0 through B underscore 150. Now your ring has 300 points instead of just 2.
+
+The law of large numbers ensures even distribution regardless of your node count. This approach has several benefits. You get even distribution no matter how many nodes you have. You can handle heterogeneous hardware by giving more powerful nodes more virtual nodes. And when nodes join or leave, data movement is gradual rather than sudden.
+
+Consistent hashing with virtual nodes is used by Cassandra, DynamoDB, Riak, and Amazon Dynamo.
+
+The Hot Partition Problem
+
+Even with perfect hash distribution, some keys are accessed more than others. This is sometimes called the celebrity problem.
+
+Let me give you the Instagram example. Imagine you're sharding by user ID. Kylie Jenner's user ID hashes to shard 7. When she posts a photo, her 400 million followers generate feed queries. All queries for her data hit shard 7. Regular shards might handle 1,000 queries per second each, but Kylie's shard suddenly gets 400,000 queries per second. That's 400 times the normal load!
+
+There are several solutions to this problem.
+
+Solution 1: Scatter-Gather for Hot Keys
+
+For known hot keys, you add a random suffix to spread them across shards. When writing a hot key, you append a random number from 0 to 99, creating 100 sub-keys. Each sub-key gets written to its own shard based on the hash. When reading a hot key, you query all 100 possible sub-keys across all their shards, then aggregate the results. Now Kylie's data is spread across up to 100 shards. Reading requires 100 times more calls, but they can be parallelized.
+
+Solution 2: Application-Level Caching
+
+You cache celebrity data in front of your database. Clients query a Redis cache that can handle 100,000 queries per second. The cache stores Kylie's recent posts, follower counts, and other frequently accessed data. With a cache hit rate of 99% or higher for celebrities, your database is barely touched.
+
+Solution 3: Read Replicas for Hot Shards
+
+You create a hot shard primary with multiple replicas. Replica 1, Replica 2, Replica 3, and Replica 4 all copy the hot shard's data. Then you load balance reads across all 5 copies, giving you 5 times the capacity.
+
+Solution 4: Workload Isolation
+
+You dedicate specific shards to known hot users. Shards 1 through 10 handle regular users using hash-based distribution. Shard 11 is dedicated exclusively to Kylie Jenner. Shard 12 handles other top celebrities as a dedicated pool. You implement special routing logic for these known hot users.
+
+Cross-Shard Operations
+
+Cross-shard operations are one of the biggest challenges in sharded systems.
+
+The challenge is straightforward. A single-shard query, like selecting all orders where user ID equals 123, is efficient because user ID is your shard key. This query hits exactly one shard. But a cross-shard query, like selecting all orders where order date is greater than January 1st 2024, is expensive. Since order date is not your shard key, you must query all shards.
+
+Cross-shard joins are where sharding gets really painful. Imagine you have orders sharded by user ID and products sharded by product ID. Now you want to select all data from orders joined with products where the order's user ID is 123. Here's what happens: First, you find orders for user 123, which hits one shard. Good so far. Second, for each order, you need to find the corresponding product. This scatters queries to product shards. Third, you've created an N plus 1 query problem across the network, which is extremely slow.
+
+There are several solutions for cross-shard queries.
+
+Solution 1: Denormalization
+
+Instead of joining tables, you store product data directly with each order. Your order record includes not just the product ID, but also the product name and price. The pros are that you need no joins and can query a single shard. The cons are data duplication and update anomalies. For example, if a product's price changes, you have inconsistent data across orders.
+
+Solution 2: Broadcast Tables
+
+You replicate small reference tables to all shards. If your products table has 100,000 products totaling around 100 megabytes, you replicate it to all order shards. Now joins can happen locally on each shard, which is fast. Each order shard contains its orders plus a complete copy of the products table. There's a products master that broadcasts updates to all shards.
+
+Solution 3: Colocate Related Data
+
+You shard related tables using the same key. Orders are sharded by user ID. Order items are also sharded by user ID, derived through the order ID to user ID relationship. User profiles are sharded by user ID. Now all of user 123's data lives on the same shard, enabling local joins. This is called the shard colocation pattern, and it's very powerful when it works.
+
+Solution 4: Scatter-Gather Query
+
+When cross-shard queries are unavoidable, you implement scatter-gather. You send the query to all shards in parallel, collecting futures for each shard's response. Then you collect and merge the results from all shards. The performance cost is N network calls instead of 1, but they're parallelized so the latency is much better than sequential queries.
+
+Resharding Strategies
+
+Eventually, you'll need more shards. The question is how to migrate without downtime.
+
+Strategy 1: Double-Write Migration
+
+This is a five-phase process. In phase 1, you write to both old and new sharding schemes. Old writes use hash of key mod 4. New writes use hash of key mod 8. Both receive every write. In phase 2, you run a background job to copy old data to new shards. You scan the old shards, copy data to new shard locations, and track your progress. In phase 3, you switch reads to new shards while writes still go to both. In phase 4, you stop writes to old shards after verifying new shards have all data, completing the cutover. In phase 5, you decommission the old shards.
+
+The pros are zero downtime. The cons are twice the write load during migration and complex coordination.
+
+Strategy 2: Virtual Sharding
+
+You start with more logical shards than physical nodes. Initially, you might have 32 virtual shards on 4 physical nodes. Node A holds shards 1 through 8, Node B holds shards 9 through 16, Node C holds shards 17 through 24, and Node D holds shards 25 through 32. When you grow to 8 physical nodes, those same 32 virtual shards get redistributed. Now Node A holds shards 1 through 4, Node B holds shards 5 through 8, Node C holds shards 9 through 12, and so on. There's no data movement! You just reassign the virtual to physical mapping.
+
+Most production systems use this approach. Plan for 10x growth from the start.
+
+Strategy 3: Online Schema Change Tools
+
+Several tools handle the complexity of live migrations. Vitess VReplication is a MySQL sharding solution created by YouTube. gh-ost is GitHub's online schema migration tool. And pt-online-schema-change is part of the Percona toolkit. These tools abstract away much of the migration complexity.
+
+Sharding Anti-Patterns
+
+Let me walk you through common mistakes people make with sharding.
+
+Anti-Pattern 1: Sharding Too Early
+
+There's a saying: premature sharding is the root of all evil. A well-tuned PostgreSQL database can handle over 50,000 simple queries per second, more than 10 terabytes of data with proper indexing, and millions of concurrent connections when using pgbouncer. Shard when you actually need it, not before.
+
+Anti-Pattern 2: Wrong Shard Key
+
+Changing your shard key requires a full data migration. Classic mistakes include sharding by timestamp, which creates hot spots; sharding by a field that's not in your queries, which forces scatter-gather for every query; and sharding by a low-cardinality field, which leads to uneven distribution.
+
+Anti-Pattern 3: Ignoring Operational Complexity
+
+Sharded systems require significantly more operational work. You need cross-shard query coordination, distributed transactions or saga patterns, complex backup and restore procedures, per-shard monitoring and alerting, and shard-aware connection pooling. Budget 3 to 4 times the operational complexity compared to a single database.
+
+Anti-Pattern 4: Auto-Increment Primary Keys
+
+Don't use auto-increment for your primary keys in a sharded system. Inserting with auto-increment creates a hot spot on the current shard for sequential writes. Instead, use UUIDs for random distribution across shards. Or use Twitter Snowflake IDs, which are time-based but include the shard and worker ID. This makes them sortable and distributed.
+
+Sharding at Scale: Real Examples
+
+Let me share how major companies actually implement sharding.
+
+Instagram shards by user ID. Each shard is PostgreSQL. They use consistent hashing with virtual nodes. Celebrity hot spots are handled through caching plus read replicas.
+
+Uber shards by city or region, which is called geographic sharding. Each city's data is mostly independent, so cross-city queries are rare. This makes operational isolation much easier.
+
+Stripe shards by merchant ID. Since financial data requires strong consistency, they use Vitess for MySQL sharding. They handle cross-shard transactions for settlements using distributed transaction protocols.
+
+Key Concepts Checklist
+
+When discussing sharding in an interview, make sure you can do the following. Justify why sharding is needed by calculating data size and queries per second. Choose a shard key with clear reasoning. Address hot partition mitigation strategies. Discuss your cross-shard query strategy. Consider operational complexity honestly. And plan for resharding from the beginning.
+
+Practical Insights
+
+Let me give you some practical guidance on when to use sharding.
+
+You should shard when a single node can't handle your write throughput, when your data doesn't fit on a single node even with compression, when you have regulatory requirements like data residency, or when you need operational isolation such as tenant boundaries.
+
+You should not shard when you only need read scaling, because read replicas solve that problem. Don't shard if you're having performance issues that could be solved by tuning indexes and queries first. And don't shard for future-proofing. The principle of You Aren't Gonna Need It applies here.
+
+There are three levels of sharding complexity. Level 1 is application-level sharding, where you manage routing yourself. Level 2 is proxy-based sharding using tools like Vitess or ProxySQL. Level 3 is database-native sharding provided by systems like CockroachDB, Spanner, or Citus.
+
+Level 3 is easiest to operate but may have limitations in terms of flexibility and control.
